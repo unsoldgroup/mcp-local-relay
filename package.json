@@ -1,0 +1,61 @@
+{
+  "name": "@unsoldgroup/mcp-local-relay",
+  "version": "0.1.0",
+  "description": "Persistent local MCP relay with hot-swap onboarding, cached tool discovery, LaunchAgent management, and status endpoints.",
+  "type": "module",
+  "packageManager": "pnpm@10.28.2",
+  "license": "MIT",
+  "author": "Unsold Group (https://unsold.group)",
+  "homepage": "https://github.com/unsoldgroup/mcp-local-relay#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unsoldgroup/mcp-local-relay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/unsoldgroup/mcp-local-relay/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "relay",
+    "proxy",
+    "launchagent",
+    "codex",
+    "claude",
+    "local-first",
+    "posthog"
+  ],
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "mcp-local-relay": "bin/mcp-local-relay.mjs",
+    "mcp-local-relayctl": "bin/mcp-local-relayctl.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "pnpm build",
+    "pretest": "pnpm build",
+    "test": "node --test dist/test/*.test.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0"
+  }
+}
