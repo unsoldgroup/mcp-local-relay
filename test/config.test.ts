@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeConfig } from '../src/config.js';
+import { resolveUpgradeCommand } from '../src/cli.js';
 
 test('normalizes minimal config', () => {
   const config = normalizeConfig({
@@ -91,4 +92,19 @@ test('rejects non-local menu admin urls', () => {
       ],
     }),
   );
+});
+
+test('resolves upgrade command from package manager', () => {
+  assert.deepEqual(resolveUpgradeCommand(undefined, 'pnpm/10.28.2 npm/? node/v24'), {
+    command: 'pnpm',
+    args: ['add', '-g', 'mcp-local-relay@latest'],
+  });
+  assert.deepEqual(resolveUpgradeCommand('npm'), {
+    command: 'npm',
+    args: ['install', '-g', 'mcp-local-relay@latest'],
+  });
+  assert.deepEqual(resolveUpgradeCommand(undefined, undefined, '/Users/al/Library/pnpm/mcp-local-relayctl'), {
+    command: 'pnpm',
+    args: ['add', '-g', 'mcp-local-relay@latest'],
+  });
 });

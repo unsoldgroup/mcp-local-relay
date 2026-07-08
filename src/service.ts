@@ -103,6 +103,12 @@ export async function serve(options: ServeOptions) {
         json(res, 200, clientConfig(host, port, mcpPath));
         return;
       }
+      if (req.method === 'POST' && url.pathname === '/servers') {
+        const body = await readJsonBody(req);
+        const result = await manager.addServer(body);
+        json(res, 200, toolResponseJson(result));
+        return;
+      }
       if (req.method === 'POST' && url.pathname === '/restart') {
         json(res, 202, { ok: true, restarting: true });
         setTimeout(() => {
@@ -163,16 +169,16 @@ export async function serve(options: ServeOptions) {
   return { httpServer, manager };
 }
 
-function json(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { 'content-type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
 async function readJsonBody(req: IncomingMessage) {
   const chunks = [];
   for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   const raw = Buffer.concat(chunks).toString('utf8');
   return raw.length ? JSON.parse(raw) : undefined;
+}
+
+function json(res: ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(body));
 }
 
 function clientConfig(host: string, port: number, mcpPath: string) {
@@ -189,4 +195,15 @@ function clientConfig(host: string, port: number, mcpPath: string) {
       },
     },
   };
+}
+
+function toolResponseJson(result: unknown) {
+  const content = (result as { content?: Array<{ text?: string }> })?.content;
+  const text = content?.find((item) => typeof item.text === 'string')?.text;
+  if (!text) return result;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return result;
+  }
 }

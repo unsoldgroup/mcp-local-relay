@@ -1,7 +1,7 @@
 # mcp-local-relay
 
-[![npm version](https://img.shields.io/npm/v/@unsoldgroup/mcp-local-relay?logo=npm&color=cb3837)](https://www.npmjs.com/package/@unsoldgroup/mcp-local-relay)
-[![npm downloads](https://img.shields.io/npm/dm/@unsoldgroup/mcp-local-relay?logo=npm&color=cb3837)](https://www.npmjs.com/package/@unsoldgroup/mcp-local-relay)
+[![npm version](https://img.shields.io/npm/v/mcp-local-relay?logo=npm&color=cb3837)](https://www.npmjs.com/package/mcp-local-relay)
+[![npm downloads](https://img.shields.io/npm/dm/mcp-local-relay?logo=npm&color=cb3837)](https://www.npmjs.com/package/mcp-local-relay)
 [![GitHub stars](https://img.shields.io/github/stars/unsoldgroup/mcp-local-relay?logo=github)](https://github.com/unsoldgroup/mcp-local-relay/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/unsoldgroup/mcp-local-relay?logo=github)](https://github.com/unsoldgroup/mcp-local-relay/network/members)
 [![CI](https://github.com/unsoldgroup/mcp-local-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/unsoldgroup/mcp-local-relay/actions/workflows/ci.yml)
@@ -10,7 +10,11 @@
 
 Persistent local MCP relay for developer machines.
 
-`mcp-local-relay` runs once on localhost, connects to remote MCP servers in the background, caches tool discovery, exposes health/status, and lets agents hot-add or refresh upstream MCP servers through MCP tools. It is meant to make clients like Codex, Claude, Cursor, and desktop apps point at one fast local MCP endpoint instead of each paying remote startup/auth/tool-list costs.
+`mcp-local-relay` runs once on localhost, keeps upstream MCP servers warm, caches tool discovery, exposes health/status, and lets agents hot-add or refresh upstream MCP servers through MCP tools. Point Codex, Claude Code, Antigravity, Cursor, and desktop apps at one fast local MCP endpoint instead of duplicating the same MCP connections in every session.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/unsoldgroup/mcp-local-relay/main/docs/assets/relay-topology.svg" alt="Codex, Claude Code, and Antigravity share one local MCP relay connected to upstream MCP servers." width="860">
+</p>
 
 > **Status: v0.1 — public initial release.** Streamable HTTP upstreams, cached
 > tool discovery, hot-swap MCP onboarding tools, PostHog CLI-mode preset,
@@ -21,9 +25,12 @@ Persistent local MCP relay for developer machines.
 
 ## Why
 
-Raw MCP clients often do eager startup discovery. Remote or large MCP servers can slow launch, fail on auth, or inject huge tool schemas into context. A persistent local relay gives you:
+Raw MCP clients often do eager startup discovery. Remote or large MCP servers can slow launch, fail on auth, or inject huge tool schemas into context. If you run several agent sessions, each one tends to start its own copy of the same MCP connections.
+
+A persistent local relay gives you:
 
 - fast localhost startup
+- one shared MCP instance for many Codex, Claude Code, Antigravity, Cursor, or desktop sessions
 - cached `tools/list`
 - low-context provider presets, starting with PostHog CLI mode
 - LaunchAgent lifecycle and logs on macOS
@@ -41,11 +48,19 @@ Raw MCP clients often do eager startup discovery. Remote or large MCP servers ca
 ## Install
 
 ```sh
-pnpm add -g @unsoldgroup/mcp-local-relay
+pnpm add -g mcp-local-relay
 mcp-local-relayctl init
 mcp-local-relayctl install
 mcp-local-relayctl start
 ```
+
+Update later with:
+
+```sh
+mcp-local-relayctl upgrade
+```
+
+The LaunchAgent points at the installed global CLI path, so upgrading the package and restarting the agent moves every client session to the latest relay without changing client MCP config. If your global install uses a specific package manager, pass `--package-manager pnpm`, `npm`, `yarn`, or `bun`.
 
 For development from a checkout:
 
@@ -57,7 +72,7 @@ node bin/mcp-local-relay.mjs serve --config examples/config.posthog.json
 
 ## Client Config
 
-Point clients at the relay once:
+Point every client at the relay once:
 
 ```json
 {
@@ -70,7 +85,73 @@ Point clients at the relay once:
 }
 ```
 
-After that, use the relay's MCP tools to add or update upstream servers without editing the client config.
+After that, Codex, Claude Code, Antigravity, Cursor, and other Streamable HTTP MCP clients can share the same local endpoint:
+
+```text
+http://127.0.0.1:3764/mcp
+```
+
+Use the relay's MCP tools or CLI to add or update upstream servers without editing every client config again.
+
+## Add MCP Servers
+
+An upstream server config looks like this:
+
+```json
+{
+  "id": "posthog",
+  "name": "PostHog",
+  "category": "Product analytics",
+  "mode": "posthog-cli",
+  "remote": {
+    "type": "streamable_http",
+    "url": "https://mcp.posthog.com/mcp"
+  },
+  "envFile": "~/.config/mcp-local-relay/posthog.env",
+  "cache": {
+    "toolsTtlMs": 900000
+  }
+}
+```
+
+### Warm Add From An Agent
+
+Ask any agent connected to the relay to call `relay_add_server` with the server config:
+
+```json
+{
+  "id": "docs",
+  "name": "Docs",
+  "category": "Documentation",
+  "remote": {
+    "type": "streamable_http",
+    "url": "https://your-docs-mcp.example.com/mcp"
+  },
+  "cache": {
+    "toolsTtlMs": 900000
+  }
+}
+```
+
+`relay_add_server` validates the upstream MCP, opens the connection, caches `tools/list`, persists the config, and emits `notifications/tools/list_changed` so clients that support it can see the new tools without restarting.
+
+### Warm Add From The CLI
+
+Use one of the example server files, or create your own:
+
+```sh
+mcp-local-relayctl add --file examples/server.posthog.json --warm
+mcp-local-relayctl add --file examples/server.docs.json --warm
+```
+
+`--warm` sends the config to the running local relay. Without `--warm`, the CLI edits the config file offline:
+
+```sh
+mcp-local-relayctl add --file examples/server.search.json
+mcp-local-relayctl restart
+```
+
+More examples live in [`examples/`](examples/).
 
 ## Hot-Swap Tools
 
@@ -112,6 +193,12 @@ mcp-local-relayctl status
 mcp-local-relayctl logs
 curl http://127.0.0.1:3764/status
 ```
+
+The optional macOS menu bar app shows the same local relay state:
+
+<p>
+  <img src="https://raw.githubusercontent.com/unsoldgroup/mcp-local-relay/main/docs/assets/status-bar-menu.png" alt="mcp-local-relay macOS menu bar status showing four MCP servers and thirty-six tools." width="235">
+</p>
 
 The optional macOS status bar app lives in
 `macos/McpLocalRelayStatusBar`. It is a small SwiftUI `MenuBarExtra` app

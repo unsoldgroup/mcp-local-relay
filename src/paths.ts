@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-export const packageName = '@unsoldgroup/mcp-local-relay';
+export const packageName = 'mcp-local-relay';
 export const serviceName = 'mcp-local-relay';
 export const launchAgentLabel = 'com.unsoldgroup.mcp-local-relay';
 

@@ -21,14 +21,33 @@ struct McpLocalRelayStatusBarApp: App {
 @MainActor
 final class RelayStatusModel: ObservableObject {
     @Published var status: RelayStatus?
+    @Published var corpusStatus: CorpusCodexStatus?
     @Published var errorMessage = ""
+    @Published var corpusErrorMessage = ""
     @Published var isLoading = false
 
     private let baseURL = URL(string: "http://127.0.0.1:3764")!
+    private let corpusBaseURL = URL(string: "http://127.0.0.1:3768")!
     private let decoder = JSONDecoder()
     private var pollingTask: Task<Void, Never>?
+    private var willSleepObserver: NSObjectProtocol?
+    private var didWakeObserver: NSObjectProtocol?
 
     init() {
+        willSleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { await self?.autoPauseForSleep() }
+        }
+        didWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { await self?.autoResumeAfterWake() }
+        }
         pollingTask = Task { [weak self] in
             await self?.refresh()
             while !Task.isCancelled {
@@ -40,6 +59,12 @@ final class RelayStatusModel: ObservableObject {
 
     deinit {
         pollingTask?.cancel()
+        if let willSleepObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(willSleepObserver)
+        }
+        if let didWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(didWakeObserver)
+        }
     }
 
     var menuTitle: String {
@@ -54,10 +79,19 @@ final class RelayStatusModel: ObservableObject {
         return "bolt.horizontal.circle"
     }
 
+    var corpusMenuTitle: String {
+        guard let corpusStatus else { return "Corpus Codex · Offline" }
+        var parts = ["Corpus Codex", corpusStatus.state.capitalized, "\(corpusStatus.done) done"]
+        if corpusStatus.failed > 0 { parts.append("\(corpusStatus.failed) failed") }
+        if corpusStatus.needsHuman > 0 { parts.append("\(corpusStatus.needsHuman) human") }
+        return parts.joined(separator: " · ")
+    }
+
     func refresh() async {
         isLoading = true
         defer { isLoading = false }
 
+        await refreshCorpus()
         do {
             let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "status"))
             try check(response)
@@ -66,6 +100,18 @@ final class RelayStatusModel: ObservableObject {
         } catch {
             status = nil
             errorMessage = error.localizedDescription
+        }
+    }
+
+    func refreshCorpus() async {
+        do {
+            let (data, response) = try await URLSession.shared.data(from: corpusBaseURL.appending(path: "status"))
+            try check(response)
+            corpusStatus = try decoder.decode(CorpusCodexStatus.self, from: data)
+            corpusErrorMessage = ""
+        } catch {
+            corpusStatus = nil
+            corpusErrorMessage = error.localizedDescription
         }
     }
 
@@ -88,6 +134,36 @@ final class RelayStatusModel: ObservableObject {
         await refresh()
     }
 
+    func corpusStart() async {
+        await postCorpus(path: "start", body: [:])
+        await refreshCorpus()
+    }
+
+    func corpusPause() async {
+        await postCorpus(path: "pause", body: [:])
+        await refreshCorpus()
+    }
+
+    func corpusResume() async {
+        await postCorpus(path: "resume", body: [:])
+        await refreshCorpus()
+    }
+
+    func corpusDrain() async {
+        await postCorpus(path: "drain", body: [:])
+        await refreshCorpus()
+    }
+
+    func corpusStopAfterCurrent() async {
+        await postCorpus(path: "stop-after-current", body: [:])
+        await refreshCorpus()
+    }
+
+    func corpusPushCompleted() async {
+        await postCorpus(path: "push-completed", body: [:])
+        await refreshCorpus()
+    }
+
     func copyClientConfig() async {
         do {
             let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "client-config"))
@@ -107,6 +183,29 @@ final class RelayStatusModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
+    func openCorpusLedger() {
+        NSWorkspace.shared.open(URL(filePath: "/Users/astemarie/code/insurance-corpus/eval/batch/codex-ledger.jsonl"))
+    }
+
+    func openCorpusFailures() {
+        NSWorkspace.shared.open(URL(string: "http://127.0.0.1:3768/failures")!)
+    }
+
+    private func autoPauseForSleep() async {
+        guard corpusStatus?.state == "running" else { return }
+        await postCorpus(path: "pause", body: ["pausedBy": "status-bar", "reason": "system_sleep"])
+        await refreshCorpus()
+    }
+
+    private func autoResumeAfterWake() async {
+        guard corpusStatus?.pausedBy == "status-bar" else {
+            await refreshCorpus()
+            return
+        }
+        await postCorpus(path: "resume", body: ["autoOnly": true])
+        await refreshCorpus()
+    }
+
     private func post(path: String) async {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = "POST"
@@ -116,6 +215,20 @@ final class RelayStatusModel: ObservableObject {
             errorMessage = ""
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func postCorpus(path: String, body: [String: Any]) async {
+        var request = URLRequest(url: corpusBaseURL.appending(path: path))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            try check(response)
+            corpusErrorMessage = ""
+        } catch {
+            corpusErrorMessage = error.localizedDescription
         }
     }
 
@@ -132,8 +245,8 @@ struct RelayMenu: View {
     var body: some View {
         if let status = model.status {
             Section {
-                Text(status.compactSummary)
-                Text("Uptime \(formatUptime(status.uptimeMs)) · Sessions \(status.sessions)")
+                Label(status.compactSummary, systemImage: status.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                Label("Uptime \(formatUptime(status.uptimeMs)) · Sessions \(status.sessions)", systemImage: "clock")
             }
 
             if status.servers.isEmpty {
@@ -143,20 +256,25 @@ struct RelayMenu: View {
             } else {
                 ForEach(status.serverGroups) { group in
                     Section(group.name) {
+                        if group.name == "Local Automation" {
+                            CorpusCodexMenu(model: model)
+                        }
                         ForEach(group.servers) { server in
                             Menu(server.compactTitle) {
                                 if !server.detailText.isEmpty {
                                     Text(server.detailText)
                                 }
-                                StatusLine(title: "ID", value: server.id)
-                                StatusLine(title: "Status", value: server.statusText)
-                                StatusLine(title: "Tools", value: String(server.cachedTools))
-                                StatusLine(title: "Last refresh", value: formatTime(server.cachedAt))
+                                StatusLine(title: "ID", value: server.id, systemImage: "number")
+                                StatusLine(title: "Status", value: server.statusText, systemImage: server.statusIcon)
+                                StatusLine(title: "Tools", value: String(server.cachedTools), systemImage: "wrench.and.screwdriver")
+                                StatusLine(title: "Last refresh", value: formatTime(server.cachedAt), systemImage: "clock.arrow.circlepath")
                                 if !server.lastRefreshError.isEmpty {
                                     Text(server.lastRefreshError)
                                 }
-                                Button("Refresh") {
+                                Button {
                                     Task { await model.refreshServer(id: server.id) }
+                                } label: {
+                                    Label("Refresh", systemImage: "arrow.clockwise")
                                 }
                             }
                         }
@@ -164,30 +282,40 @@ struct RelayMenu: View {
                 }
             }
         } else {
-            Text("Relay offline")
+            Label("Relay offline", systemImage: "wifi.exclamationmark")
         }
 
         if !model.errorMessage.isEmpty {
             Section {
-                Text(model.errorMessage)
+                Label(model.errorMessage, systemImage: "exclamationmark.triangle")
             }
         }
 
         Section {
-            Button("Refresh Status") {
+            Button {
                 Task { await model.refresh() }
+            } label: {
+                Label("Refresh Status", systemImage: "arrow.clockwise")
             }
-            Button("Refresh All MCPs") {
+            Button {
                 Task { await model.refreshAllServers() }
+            } label: {
+                Label("Refresh All MCPs", systemImage: "arrow.triangle.2.circlepath")
             }
-            Button("Copy Client Config") {
+            Button {
                 Task { await model.copyClientConfig() }
+            } label: {
+                Label("Copy Client Config", systemImage: "doc.on.doc")
             }
-            Button("Open Logs Folder") {
+            Button {
                 model.openLogsFolder()
+            } label: {
+                Label("Open Logs Folder", systemImage: "folder")
             }
-            Button("Restart Relay") {
+            Button {
                 Task { await model.restartRelay() }
+            } label: {
+                Label("Restart Relay", systemImage: "power")
             }
             Divider()
             Button("Quit") {
@@ -197,12 +325,81 @@ struct RelayMenu: View {
     }
 }
 
+struct CorpusCodexMenu: View {
+    @ObservedObject var model: RelayStatusModel
+
+    var body: some View {
+        Menu {
+            if let status = model.corpusStatus {
+                Label(status.summary, systemImage: status.systemImage)
+                Label(status.detail, systemImage: "gauge.with.dots.needle.50percent")
+                if let last = status.lastCompleted, !last.isEmpty {
+                    Label("Last: \(last)", systemImage: "checkmark.seal")
+                }
+                if let heartbeat = status.lastHeartbeatAt, !heartbeat.isEmpty {
+                    Label("Heartbeat: \(heartbeat)", systemImage: "waveform.path.ecg")
+                }
+                Divider()
+                Button {
+                    Task { await model.corpusStart() }
+                } label: {
+                    Label("Start", systemImage: "play.fill")
+                }
+                Button {
+                    Task { await model.corpusPause() }
+                } label: {
+                    Label("Pause", systemImage: "pause.fill")
+                }
+                Button {
+                    Task { await model.corpusResume() }
+                } label: {
+                    Label("Resume", systemImage: "play.circle")
+                }
+                Button {
+                    Task { await model.corpusDrain() }
+                } label: {
+                    Label("Drain After Current", systemImage: "arrow.down.to.line.compact")
+                }
+                Button {
+                    Task { await model.corpusStopAfterCurrent() }
+                } label: {
+                    Label("Stop After Current", systemImage: "stop.circle")
+                }
+                Button {
+                    Task { await model.corpusPushCompleted() }
+                } label: {
+                    Label("Push Completed Now", systemImage: "icloud.and.arrow.up")
+                }
+                Divider()
+                Button {
+                    model.openCorpusLedger()
+                } label: {
+                    Label("Open Ledger", systemImage: "list.bullet.rectangle")
+                }
+                Button {
+                    model.openCorpusFailures()
+                } label: {
+                    Label("Open Failures", systemImage: "exclamationmark.octagon")
+                }
+            } else {
+                Label("Control service offline", systemImage: "wifi.exclamationmark")
+                if !model.corpusErrorMessage.isEmpty {
+                    Text(model.corpusErrorMessage)
+                }
+            }
+        } label: {
+            Label(model.corpusMenuTitle, systemImage: model.corpusStatus?.systemImage ?? "doc.text.magnifyingglass")
+        }
+    }
+}
+
 struct StatusLine: View {
     let title: String
     let value: String
+    let systemImage: String
 
     var body: some View {
-        Text("\(title): \(value)")
+        Label("\(title): \(value)", systemImage: systemImage)
     }
 }
 
@@ -265,6 +462,13 @@ struct RelayServerStatus: Decodable, Identifiable {
         return "Ready"
     }
 
+    var statusIcon: String {
+        if !enabled { return "pause.circle" }
+        if !lastRefreshError.isEmpty { return "exclamationmark.triangle" }
+        if connected { return "checkmark.circle" }
+        return "circle"
+    }
+
     var categoryText: String {
         let value = (category ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? "Other" : value
@@ -277,6 +481,57 @@ struct RelayServerStatus: Decodable, Identifiable {
     var compactTitle: String {
         "\(name) · \(statusText) · \(cachedTools)"
     }
+}
+
+struct CorpusCodexStatus: Decodable {
+    let ok: Bool
+    let state: String
+    let active: Int
+    let workers: Int?
+    let dispatched: Int
+    let total: Int?
+    let done: Int
+    let failed: Int
+    let needsHuman: Int
+    let pending: Int?
+    let lastCompleted: String?
+    let lastStatus: String?
+    let lastHeartbeatAt: String?
+    let etaHours: Double?
+    let pausedBy: String?
+
+    var summary: String {
+        var parts = ["\(state.capitalized)", "\(done) done"]
+        if failed > 0 { parts.append("\(failed) failed") }
+        if needsHuman > 0 { parts.append("\(needsHuman) needs human") }
+        if let etaHours { parts.append("ETA \(formatEta(etaHours))") }
+        return parts.joined(separator: " · ")
+    }
+
+    var detail: String {
+        let workerText = workers.map { "\(active)/\($0)" } ?? "\(active)"
+        let pendingText = pending.map { "\($0) pending" } ?? "pending unknown"
+        let pauseText = pausedBy.map { " · paused by \($0)" } ?? ""
+        return "Active \(workerText) · \(dispatched) dispatched · \(pendingText)\(pauseText)"
+    }
+
+    var systemImage: String {
+        switch state.lowercased() {
+        case "running": return "play.circle.fill"
+        case "paused": return "pause.circle.fill"
+        case "draining": return "arrow.down.circle.fill"
+        case "stopping": return "stop.circle.fill"
+        case "complete": return "checkmark.circle.fill"
+        case "attention": return "exclamationmark.triangle.fill"
+        default: return ok ? "doc.text.magnifyingglass" : "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+private func formatEta(_ hours: Double) -> String {
+    if hours >= 48 { return String(format: "%.1fd", hours / 24) }
+    if hours >= 1 { return String(format: "%.1fh", hours) }
+    return "\(Int(hours * 60))m"
 }
 
 enum RelayError: Error {
