@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -13,6 +13,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { RelayManager } from '../src/relay-manager.js';
+import { serve } from '../src/service.js';
 
 test('hot-adds upstream server and calls localized tool', async (t) => {
   const upstream = await startMockMcpServer().catch((err: unknown) => {
@@ -46,7 +47,148 @@ test('hot-adds upstream server and calls localized tool', async (t) => {
   }
 });
 
-async function startMockMcpServer() {
+test('discovers menu status and executes upstream menu action', async (t) => {
+  const upstream = await startMockMcpServer({
+    menuStatus: {
+      title: 'Mail Index',
+      summary: 'Ready',
+      state: 'ready',
+      detail: ['Last sync 4m ago'],
+      actions: [{ id: 'sync_now', label: 'Sync Now', tool: 'sync_now' }],
+    },
+  }).catch((err: unknown) => {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EPERM') {
+      t.skip('local listen is blocked by the current sandbox');
+      return undefined;
+    }
+    throw err;
+  });
+  if (!upstream) return;
+  const dir = await mkdtemp(join(tmpdir(), 'mcp-local-relay-'));
+  const manager = new RelayManager({ servers: [] }, join(dir, 'config.json'));
+
+  try {
+    await manager.addServer({
+      id: 'mail',
+      remote: { type: 'streamable_http', url: upstream.url },
+    });
+
+    const menu = await manager.menuStatus('mail');
+    assert.equal(menu.title, 'Mail Index');
+    assert.equal(menu.summary, 'Ready');
+    assert.equal(menu.actions[0].id, 'sync_now');
+
+    const result = await manager.callMenuAction('mail', 'sync_now', { args: { force: true } });
+    assert.deepEqual(result, {
+      content: [{ type: 'text', text: 'synced:true' }],
+    });
+  } finally {
+    await upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('falls back when menu metadata is malformed and enforces confirmation', async (t) => {
+  const upstream = await startMockMcpServer({ menuStatusText: '{bad json' }).catch((err: unknown) => {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EPERM') {
+      t.skip('local listen is blocked by the current sandbox');
+      return undefined;
+    }
+    throw err;
+  });
+  if (!upstream) return;
+  const dir = await mkdtemp(join(tmpdir(), 'mcp-local-relay-'));
+  const manager = new RelayManager({ servers: [] }, join(dir, 'config.json'));
+
+  try {
+    await manager.addServer({
+      id: 'ctx',
+      remote: { type: 'streamable_http', url: upstream.url },
+      menu: {
+        actions: [{ id: 'purge', label: 'Purge', tool: 'sync_now', confirm: true }],
+      },
+    });
+
+    const menu = await manager.menuStatus('ctx');
+    assert.equal(menu.title, 'ctx');
+    assert.equal(menu.state, 'error');
+    assert.match(menu.lastError, /JSON/);
+    assert.equal(menu.actions[0].id, 'purge');
+    await assert.rejects(() => manager.callMenuAction('ctx', 'purge', {}), /confirm/);
+  } finally {
+    await upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves menu status and menu actions over admin endpoints', async (t) => {
+  const upstream = await startMockMcpServer({
+    menuStatus: {
+      title: 'Context Mode',
+      summary: 'Indexed',
+      state: 'ready',
+      detail: ['12 chunks'],
+      actions: [{ id: 'sync_now', label: 'Sync Now', tool: 'sync_now' }],
+    },
+  }).catch((err: unknown) => {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EPERM') {
+      t.skip('local listen is blocked by the current sandbox');
+      return undefined;
+    }
+    throw err;
+  });
+  if (!upstream) return;
+  const dir = await mkdtemp(join(tmpdir(), 'mcp-local-relay-'));
+  const port = await getFreePort();
+  const configPath = join(dir, 'config.json');
+  await writeFile(
+    configPath,
+    JSON.stringify({
+      admin: { host: '127.0.0.1', port, mcpPath: '/mcp' },
+      servers: [{ id: 'ctx', remote: { type: 'streamable_http', url: upstream.url } }],
+    }),
+  );
+  const service = await serve({ configPath });
+
+  try {
+    const menuResponse = await fetch(`http://127.0.0.1:${port}/servers/ctx/menu`);
+    assert.equal(menuResponse.status, 200);
+    const menu = (await menuResponse.json()) as { title?: string; actions?: Array<{ id: string }> };
+    assert.equal(menu.title, 'Context Mode');
+    assert.equal(menu.actions?.[0].id, 'sync_now');
+
+    const actionResponse = await fetch(`http://127.0.0.1:${port}/servers/ctx/menu/actions/sync_now`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ args: { force: true } }),
+    });
+    assert.equal(actionResponse.status, 200);
+    const result = (await actionResponse.json()) as { content?: Array<{ text?: string }> };
+    assert.equal(result.content?.[0].text, 'synced:true');
+  } finally {
+    await new Promise<void>((resolve) => service.httpServer.close(() => resolve()));
+    await upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function getFreePort() {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const port = address.port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+async function startMockMcpServer(options: { menuStatus?: unknown; menuStatusText?: string } = {}) {
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const servers = new Map<string, Server>();
   const httpServer = createServer((req, res) => {
@@ -91,11 +233,41 @@ async function startMockMcpServer() {
                 required: ['message'],
               },
             },
+            {
+              name: 'sync_now',
+              description: 'Sync now',
+              inputSchema: {
+                type: 'object',
+                properties: { force: { type: 'boolean' } },
+              },
+            },
+            {
+              name: 'relay_menu_status',
+              description: 'Menu status',
+              inputSchema: { type: 'object', properties: {} },
+            },
           ],
         }));
-        server.setRequestHandler(CallToolRequestSchema, async (request) => ({
-          content: [{ type: 'text', text: String(request.params.arguments?.message || '') }],
-        }));
+        server.setRequestHandler(CallToolRequestSchema, async (request) => {
+          if (request.params.name === 'relay_menu_status') {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: options.menuStatusText ?? JSON.stringify(options.menuStatus || {}),
+                },
+              ],
+            };
+          }
+          if (request.params.name === 'sync_now') {
+            return {
+              content: [{ type: 'text', text: `synced:${String(request.params.arguments?.force || false)}` }],
+            };
+          }
+          return {
+            content: [{ type: 'text', text: String(request.params.arguments?.message || '') }],
+          };
+        });
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId) => {

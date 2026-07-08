@@ -78,6 +78,26 @@ export async function serve(options: ServeOptions) {
         json(res, 200, manager.status(transports.size));
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/menu') {
+        json(res, 200, { ok: true, servers: await manager.menuStatuses() });
+        return;
+      }
+      const serverMenuMatch = url.pathname.match(/^\/servers\/([^/]+)\/menu$/);
+      if (req.method === 'GET' && serverMenuMatch) {
+        json(res, 200, await manager.menuStatus(decodeURIComponent(serverMenuMatch[1])));
+        return;
+      }
+      const actionMatch = url.pathname.match(/^\/servers\/([^/]+)\/menu\/actions\/([^/]+)$/);
+      if (req.method === 'POST' && actionMatch) {
+        const body = await readJsonBody(req);
+        const result = await manager.callMenuAction(
+          decodeURIComponent(actionMatch[1]),
+          decodeURIComponent(actionMatch[2]),
+          body,
+        );
+        json(res, 200, result);
+        return;
+      }
       if (url.pathname !== mcpPath) {
         json(res, 404, { error: 'not_found' });
         return;
@@ -102,10 +122,7 @@ export async function serve(options: ServeOptions) {
         res.end();
         return;
       }
-      const chunks = [];
-      for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      const raw = Buffer.concat(chunks).toString('utf8');
-      await handleMcp(req, res, raw.length ? JSON.parse(raw) : undefined);
+      await handleMcp(req, res, await readJsonBody(req));
     })().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
@@ -129,4 +146,11 @@ export async function serve(options: ServeOptions) {
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+async function readJsonBody(req: IncomingMessage) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const raw = Buffer.concat(chunks).toString('utf8');
+  return raw.length ? JSON.parse(raw) : undefined;
 }
