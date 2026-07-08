@@ -1,6 +1,6 @@
 # Optional macOS Status Bar
 
-The relay daemon is still headless. A macOS `MenuBarExtra` app should read only the local admin API and render the generic menu model exposed by the relay.
+The relay daemon stays headless. The optional macOS status bar app is a small SwiftUI `MenuBarExtra` package in `macos/McpLocalRelayStatusBar` that reads only the local admin API and renders the generic menu model exposed by the relay.
 
 ## Admin API
 
@@ -8,6 +8,11 @@ The relay daemon is still headless. A macOS `MenuBarExtra` app should read only 
 - `GET /menu` returns menu models for all configured servers.
 - `GET /servers/:id/menu` returns one server's menu model.
 - `POST /servers/:id/menu/actions/:actionId` executes a menu action.
+- `GET /client-config`
+- `POST /restart`
+- `POST /servers/:id/refresh`
+
+The status bar app shows aggregate relay status, per-server menu metadata, restart and refresh controls, log-folder access, and client config copy actions.
 
 Action requests may include:
 
@@ -97,4 +102,27 @@ HTTP admin actions must target `http://127.0.0.1` or `http://localhost`. File UR
 
 ## Security
 
-The status bar app should never read env files or display secrets. The relay menu model does not include remote headers, env file contents, or authorization tokens. Detailed menu status is fetched lazily and cached briefly so `/status` remains cheap.
+The status bar app should never read env files or display secrets. The relay menu model does not include remote headers, env file contents, or authorization tokens. Detailed menu status is fetched lazily and cached briefly so `/status` remains cheap. It opens the relay log folder with Finder instead of rendering log contents inline.
+
+Run from a checkout:
+
+```sh
+cd macos/McpLocalRelayStatusBar
+swift run
+```
+
+Install from a checkout:
+
+```sh
+pnpm install:status-bar
+```
+
+The installer builds a release binary, wraps it in
+`~/Applications/Mcp Local Relay Status Bar.app`, registers a user LaunchAgent
+so it opens at login, and opens the app immediately.
+
+Uninstall:
+
+```sh
+pnpm uninstall:status-bar
+```

@@ -14,8 +14,8 @@ Persistent local MCP relay for developer machines.
 
 > **Status: v0.1 — public initial release.** Streamable HTTP upstreams, cached
 > tool discovery, hot-swap MCP onboarding tools, PostHog CLI-mode preset,
-> macOS LaunchAgent helpers, and JSON health/status endpoints are implemented.
-> The optional macOS status bar app is designed but not yet shipped. Start with
+> macOS LaunchAgent helpers, JSON health/status endpoints, and a SwiftUI status
+> bar app source package are implemented. Start with
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 > [docs/STATUS-BAR.md](docs/STATUS-BAR.md).
 
@@ -113,7 +113,37 @@ mcp-local-relayctl logs
 curl http://127.0.0.1:3764/status
 ```
 
-The optional macOS status bar app is planned as a small SwiftUI app that reads `/status`.
+The optional macOS status bar app lives in
+`macos/McpLocalRelayStatusBar`. It is a small SwiftUI `MenuBarExtra` app
+that reads the local admin API, shows relay/server status, refreshes upstream
+tool caches, restarts the LaunchAgent-backed relay, opens the logs folder, and
+copies client config without reading env files.
+
+```sh
+cd macos/McpLocalRelayStatusBar
+swift run
+```
+
+To install it as a login item from a checkout:
+
+```sh
+pnpm install:status-bar
+```
+
+That builds the app into `~/Applications/Mcp Local Relay Status Bar.app`,
+registers `~/Library/LaunchAgents/com.unsoldgroup.mcp-local-relay-status-bar.plist`,
+and opens it immediately. Remove it with:
+
+```sh
+pnpm uninstall:status-bar
+```
+
+The local admin API used by the app is:
+
+- `GET /status`
+- `GET /client-config`
+- `POST /servers/:id/refresh`
+- `POST /restart`
 
 ## Documentation
 

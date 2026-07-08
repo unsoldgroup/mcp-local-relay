@@ -97,6 +97,8 @@ export class RelayManager {
     const servers = [...this.states.values()].map((state): RelayServerStatus => ({
       id: state.config.id,
       name: state.config.name || state.config.id,
+      description: state.config.description || '',
+      category: state.config.category || '',
       enabled: state.config.enabled !== false,
       mode: state.config.mode || 'generic-cached',
       remoteUrl: state.config.remote.url,
@@ -688,6 +690,8 @@ const serverSchema = {
   properties: {
     id: { type: 'string' },
     name: { type: 'string' },
+    description: { type: 'string' },
+    category: { type: 'string' },
     enabled: { type: 'boolean' },
     mode: { type: 'string', enum: ['generic-cached', 'posthog-cli'] },
     remote: {

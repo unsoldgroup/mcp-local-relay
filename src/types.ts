@@ -39,6 +39,8 @@ export interface RelayMenuConfig {
 export interface RelayServerConfig {
   id: string;
   name?: string;
+  description?: string;
+  category?: string;
   enabled?: boolean;
   mode?: RelayMode;
   remote: RelayRemoteConfig;
@@ -66,6 +68,8 @@ export interface CachedToolsFile {
 export interface RelayServerStatus {
   id: string;
   name: string;
+  description: string;
+  category: string;
   enabled: boolean;
   mode: RelayMode;
   remoteUrl: string;

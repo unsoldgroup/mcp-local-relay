@@ -40,12 +40,15 @@
     "dist",
     "bin",
     "examples",
+    "macos",
     "docs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
+    "install:status-bar": "bash macos/install-status-bar.sh",
+    "uninstall:status-bar": "bash macos/uninstall-status-bar.sh",
     "prepublishOnly": "pnpm build",
     "pretest": "pnpm build",
     "test": "node --test dist/test/*.test.js",

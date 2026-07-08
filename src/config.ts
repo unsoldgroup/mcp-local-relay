@@ -50,6 +50,8 @@ export function normalizeServer(input: RelayServerConfig): RelayServerConfig {
   return {
     id: input.id,
     name: input.name || input.id,
+    description: input.description || '',
+    category: input.category || '',
     enabled: input.enabled !== false,
     mode: normalizeMode(input.mode),
     remote: {

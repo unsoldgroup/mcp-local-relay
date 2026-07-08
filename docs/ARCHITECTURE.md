@@ -32,3 +32,15 @@ When upstream configuration changes, the relay:
 4. emits `notifications/tools/list_changed`
 
 Clients that honor tool-list change notifications can discover new tools without restarting their session.
+
+The hotswap control surface is exposed through MCP tools on the relay itself:
+
+- `relay_validate_server`
+- `relay_add_server`
+- `relay_update_server`
+- `relay_remove_server`
+- `relay_enable_server`
+- `relay_disable_server`
+- `relay_refresh_tools`
+
+`relay_add_server` validates the Streamable HTTP upstream, caches its tools, writes the relay config atomically, and emits `notifications/tools/list_changed` to active sessions.
