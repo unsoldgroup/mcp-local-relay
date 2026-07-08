@@ -21,6 +21,7 @@ struct McpLocalRelayStatusBarApp: App {
 @MainActor
 final class RelayStatusModel: ObservableObject {
     @Published var status: RelayStatus?
+    @Published var menuStatus: RelayMenuStatus?
     @Published var corpusStatus: CorpusCodexStatus?
     @Published var errorMessage = ""
     @Published var corpusErrorMessage = ""
@@ -91,16 +92,29 @@ final class RelayStatusModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        await refreshCorpus()
         do {
-            let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "status"))
-            try check(response)
-            status = try decoder.decode(RelayStatus.self, from: data)
+            async let statusResult = fetchStatus()
+            async let menuResult = fetchMenu()
+            status = try await statusResult
+            menuStatus = try await menuResult
             errorMessage = ""
         } catch {
             status = nil
+            menuStatus = nil
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func fetchStatus() async throws -> RelayStatus {
+        let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "status"))
+        try check(response)
+        return try decoder.decode(RelayStatus.self, from: data)
+    }
+
+    private func fetchMenu() async throws -> RelayMenuStatus {
+        let (data, response) = try await URLSession.shared.data(from: baseURL.appending(path: "menu"))
+        try check(response)
+        return try decoder.decode(RelayMenuStatus.self, from: data)
     }
 
     func refreshCorpus() async {
@@ -116,14 +130,24 @@ final class RelayStatusModel: ObservableObject {
     }
 
     func refreshServer(id: String) async {
-        await post(path: "servers/\(id)/refresh")
         await refresh()
     }
 
     func refreshAllServers() async {
-        guard let status else { return }
-        for server in status.servers where server.enabled {
-            await post(path: "servers/\(server.id)/refresh")
+        await refresh()
+    }
+
+    func runMenuAction(serverId: String, actionId: String, confirm: Bool) async {
+        var request = URLRequest(url: baseURL.appending(path: "servers/\(serverId)/menu/actions/\(actionId)"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["confirm": confirm])
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            try check(response)
+            errorMessage = ""
+        } catch {
+            errorMessage = error.localizedDescription
         }
         await refresh()
     }
@@ -256,27 +280,8 @@ struct RelayMenu: View {
             } else {
                 ForEach(status.serverGroups) { group in
                     Section(group.name) {
-                        if group.name == "Local Automation" {
-                            CorpusCodexMenu(model: model)
-                        }
                         ForEach(group.servers) { server in
-                            Menu(server.compactTitle) {
-                                if !server.detailText.isEmpty {
-                                    Text(server.detailText)
-                                }
-                                StatusLine(title: "ID", value: server.id, systemImage: "number")
-                                StatusLine(title: "Status", value: server.statusText, systemImage: server.statusIcon)
-                                StatusLine(title: "Tools", value: String(server.cachedTools), systemImage: "wrench.and.screwdriver")
-                                StatusLine(title: "Last refresh", value: formatTime(server.cachedAt), systemImage: "clock.arrow.circlepath")
-                                if !server.lastRefreshError.isEmpty {
-                                    Text(server.lastRefreshError)
-                                }
-                                Button {
-                                    Task { await model.refreshServer(id: server.id) }
-                                } label: {
-                                    Label("Refresh", systemImage: "arrow.clockwise")
-                                }
-                            }
+                            ServerMenu(model: model, server: server, menu: model.menuStatus?.server(id: server.id))
                         }
                     }
                 }
@@ -325,70 +330,60 @@ struct RelayMenu: View {
     }
 }
 
-struct CorpusCodexMenu: View {
+struct ServerMenu: View {
     @ObservedObject var model: RelayStatusModel
+    let server: RelayServerStatus
+    let menu: RelayMenuServer?
 
     var body: some View {
         Menu {
-            if let status = model.corpusStatus {
-                Label(status.summary, systemImage: status.systemImage)
-                Label(status.detail, systemImage: "gauge.with.dots.needle.50percent")
-                if let last = status.lastCompleted, !last.isEmpty {
-                    Label("Last: \(last)", systemImage: "checkmark.seal")
-                }
-                if let heartbeat = status.lastHeartbeatAt, !heartbeat.isEmpty {
-                    Label("Heartbeat: \(heartbeat)", systemImage: "waveform.path.ecg")
+            if let menu {
+                Label(menu.summary, systemImage: menu.systemImage)
+                ForEach(menu.detail.prefix(8), id: \.self) { line in
+                    Text(line)
                 }
                 Divider()
-                Button {
-                    Task { await model.corpusStart() }
-                } label: {
-                    Label("Start", systemImage: "play.fill")
-                }
-                Button {
-                    Task { await model.corpusPause() }
-                } label: {
-                    Label("Pause", systemImage: "pause.fill")
-                }
-                Button {
-                    Task { await model.corpusResume() }
-                } label: {
-                    Label("Resume", systemImage: "play.circle")
-                }
-                Button {
-                    Task { await model.corpusDrain() }
-                } label: {
-                    Label("Drain After Current", systemImage: "arrow.down.to.line.compact")
-                }
-                Button {
-                    Task { await model.corpusStopAfterCurrent() }
-                } label: {
-                    Label("Stop After Current", systemImage: "stop.circle")
-                }
-                Button {
-                    Task { await model.corpusPushCompleted() }
-                } label: {
-                    Label("Push Completed Now", systemImage: "icloud.and.arrow.up")
-                }
-                Divider()
-                Button {
-                    model.openCorpusLedger()
-                } label: {
-                    Label("Open Ledger", systemImage: "list.bullet.rectangle")
-                }
-                Button {
-                    model.openCorpusFailures()
-                } label: {
-                    Label("Open Failures", systemImage: "exclamationmark.octagon")
+                if menu.actions.isEmpty {
+                    Text("No quick actions")
+                } else {
+                    ForEach(menu.actions) { action in
+                        Button {
+                            if let url = action.url, let parsed = URL(string: url) {
+                                NSWorkspace.shared.open(parsed)
+                            } else {
+                                Task {
+                                    await model.runMenuAction(
+                                        serverId: server.id,
+                                        actionId: action.id,
+                                        confirm: action.confirm
+                                    )
+                                }
+                            }
+                        } label: {
+                            Label(action.label, systemImage: action.systemImage ?? "bolt")
+                        }
+                    }
                 }
             } else {
-                Label("Control service offline", systemImage: "wifi.exclamationmark")
-                if !model.corpusErrorMessage.isEmpty {
-                    Text(model.corpusErrorMessage)
+                if !server.detailText.isEmpty {
+                    Text(server.detailText)
+                }
+                StatusLine(title: "ID", value: server.id, systemImage: "number")
+                StatusLine(title: "Status", value: server.statusText, systemImage: server.statusIcon)
+                StatusLine(title: "Tools", value: String(server.cachedTools), systemImage: "wrench.and.screwdriver")
+                StatusLine(title: "Last refresh", value: formatTime(server.cachedAt), systemImage: "clock.arrow.circlepath")
+                if !server.lastRefreshError.isEmpty {
+                    Text(server.lastRefreshError)
                 }
             }
+            Divider()
+            Button {
+                Task { await model.refreshServer(id: server.id) }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
         } label: {
-            Label(model.corpusMenuTitle, systemImage: model.corpusStatus?.systemImage ?? "doc.text.magnifyingglass")
+            Label(menu?.compactTitle ?? server.compactTitle, systemImage: menu?.systemImage ?? server.statusIcon)
         }
     }
 }
@@ -430,6 +425,64 @@ struct RelayStatus: Decodable {
         return grouped
             .map { RelayServerGroup(name: $0.key, servers: $0.value) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+}
+
+struct RelayMenuStatus: Decodable {
+    let ok: Bool
+    let servers: [RelayMenuServer]
+
+    func server(id: String) -> RelayMenuServer? {
+        servers.first { $0.id == id }
+    }
+}
+
+struct RelayMenuServer: Decodable, Identifiable {
+    let id: String
+    let title: String
+    let summary: String
+    let state: String
+    let detail: [String]
+    let actions: [RelayMenuAction]
+    let cachedAt: Int?
+    let lastError: String?
+
+    var compactTitle: String {
+        "\(title) · \(summary)"
+    }
+
+    var systemImage: String {
+        switch state.lowercased() {
+        case "ready", "complete": return "checkmark.circle"
+        case "running", "syncing": return "arrow.triangle.2.circlepath"
+        case "paused": return "pause.circle"
+        case "stale", "attention", "error": return "exclamationmark.triangle"
+        case "empty": return "tray"
+        default: return "circle"
+        }
+    }
+}
+
+struct RelayMenuAction: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let systemImage: String?
+    let confirm: Bool
+    let tool: String?
+    let url: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, label, systemImage, confirm, tool, url
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        systemImage = try c.decodeIfPresent(String.self, forKey: .systemImage)
+        confirm = try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false
+        tool = try c.decodeIfPresent(String.self, forKey: .tool)
+        url = try c.decodeIfPresent(String.self, forKey: .url)
     }
 }
 
