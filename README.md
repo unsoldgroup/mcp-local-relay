@@ -236,6 +236,7 @@ The local admin API used by the app is:
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — relay shape, tool naming, and hot-swap flow.
 - **[docs/STATUS-BAR.md](docs/STATUS-BAR.md)** — design notes for the optional macOS menu bar monitor.
+- **[docs/assets/social-preview.png](docs/assets/social-preview.png)** — 1280x640 repository social preview image for GitHub settings.
 - **[SECURITY.md](.github/SECURITY.md)** — private disclosure and secret-handling posture.
 - **[SUPPORT.md](.github/SUPPORT.md)** — what to include in bug reports.
 
