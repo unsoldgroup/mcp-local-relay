@@ -12,7 +12,15 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadEnvFile } from './env-file.js';
 import { normalizeConfig, normalizeServer, toolsCachePath, writeConfig } from './config.js';
-import type { RelayConfig, RelayServerConfig, RelayServerStatus, RelayStatus } from './types.js';
+import type {
+  RelayConfig,
+  RelayMenuAction,
+  RelayMenuState,
+  RelayMenuStatus,
+  RelayServerConfig,
+  RelayServerStatus,
+  RelayStatus,
+} from './types.js';
 
 interface ToolDefinition {
   name: string;
@@ -29,6 +37,9 @@ interface RelayState {
   cachedAt: number;
   lastRefreshAttemptAt: number;
   lastRefreshError: string;
+  menuStatus?: RelayMenuStatus;
+  menuCachedAt: number;
+  menuLastError: string;
 }
 
 export class RelayManager {
@@ -49,6 +60,8 @@ export class RelayManager {
         cachedAt: 0,
         lastRefreshAttemptAt: 0,
         lastRefreshError: '',
+        menuCachedAt: 0,
+        menuLastError: '',
       });
     }
   }
@@ -140,6 +153,37 @@ export class RelayManager {
     }
   }
 
+  async menuStatuses() {
+    return await Promise.all([...this.states.values()].map((state) => this.menuStatusForState(state)));
+  }
+
+  async menuStatus(id: string) {
+    return await this.menuStatusForState(this.requireState(id));
+  }
+
+  async callMenuAction(id: string, actionId: string, input: unknown) {
+    const state = this.requireState(id);
+    const body = normalizeActionRequest(input);
+    const menu = await this.menuStatusForState(state, true);
+    const action = menu.actions.find((item) => item.id === actionId);
+    if (!action) {
+      throw new McpError(ErrorCode.InvalidParams, `Unknown menu action: ${id}/${actionId}`);
+    }
+    if (action.confirm && body.confirm !== true) {
+      throw new McpError(ErrorCode.InvalidParams, `Menu action requires { "confirm": true }: ${id}/${actionId}`);
+    }
+    if (action.tool) {
+      return await this.callUpstreamActionTool(state, action, body.args);
+    }
+    if (action.method && action.url) {
+      return await callLocalHttpAction(action, body.args);
+    }
+    if (action.url) {
+      return { ok: true, action: 'open_url', url: action.url };
+    }
+    throw new McpError(ErrorCode.InvalidParams, `Menu action is not executable: ${id}/${actionId}`);
+  }
+
   async addServer(input: unknown) {
     const server = normalizeServer(input as RelayServerConfig);
     if (this.states.has(server.id)) {
@@ -151,6 +195,8 @@ export class RelayManager {
       cachedAt: 0,
       lastRefreshAttemptAt: 0,
       lastRefreshError: '',
+      menuCachedAt: 0,
+      menuLastError: '',
     };
     await this.refreshTools(state);
     this.config.servers.push(server);
@@ -167,6 +213,9 @@ export class RelayManager {
     existing.config = server;
     existing.cachedTools = [];
     existing.cachedAt = 0;
+    existing.menuStatus = undefined;
+    existing.menuCachedAt = 0;
+    existing.menuLastError = '';
     await this.refreshTools(existing);
     this.config.servers = this.config.servers.map((item) => (item.id === server.id ? server : item));
     await writeConfig(this.config, this.configPath);
@@ -215,6 +264,8 @@ export class RelayManager {
       cachedAt: 0,
       lastRefreshAttemptAt: 0,
       lastRefreshError: '',
+      menuCachedAt: 0,
+      menuLastError: '',
     };
     await this.refreshTools(state);
     this.resetClient(state);
@@ -334,6 +385,59 @@ export class RelayManager {
     return state.cachedTools;
   }
 
+  private async menuStatusForState(state: RelayState, force = false): Promise<RelayMenuStatus> {
+    const ttl = state.config.menu?.ttlMs || 15_000;
+    if (!force && state.menuStatus && Date.now() - state.menuCachedAt < ttl) {
+      return state.menuStatus;
+    }
+    try {
+      const discovered = await this.discoverMenuStatus(state);
+      const status = normalizeMenuStatus(state, discovered, '');
+      state.menuStatus = status;
+      state.menuCachedAt = Date.now();
+      state.menuLastError = '';
+      return status;
+    } catch (err) {
+      state.menuLastError = err instanceof Error ? err.message : String(err);
+      const fallback = fallbackMenuStatus(state, state.menuLastError);
+      state.menuStatus = fallback;
+      state.menuCachedAt = Date.now();
+      return fallback;
+    }
+  }
+
+  private async discoverMenuStatus(state: RelayState) {
+    if (state.config.enabled === false) return undefined;
+    if (state.config.menu?.statusUrl) return await fetchMenuStatusUrl(state.config.menu.statusUrl);
+    await this.ensureToolsFresh(state);
+    const statusTool = findMenuStatusTool(state);
+    if (!statusTool) return undefined;
+    const client = await this.getClient(state);
+    const result = await client.callTool({ name: statusTool, arguments: {} }, undefined, { timeout: 20_000 });
+    return parseToolJson(result);
+  }
+
+  private async callUpstreamActionTool(state: RelayState, action: RelayMenuAction, requestArgs: Record<string, unknown>) {
+    if (state.config.enabled === false) {
+      throw new McpError(ErrorCode.InvalidParams, `Relay server disabled: ${state.config.id}`);
+    }
+    await this.ensureToolsFresh(state, true);
+    const toolName = action.tool!;
+    const exists = state.cachedTools.some((tool) => tool.name === toolName);
+    if (!exists) throw new McpError(ErrorCode.InvalidParams, `Unknown upstream tool: ${toolName}`);
+    const client = await this.getClient(state);
+    try {
+      return await client.callTool(
+        { name: toolName, arguments: { ...(action.args || {}), ...requestArgs } },
+        undefined,
+        { timeout: 120000 },
+      );
+    } catch (err) {
+      this.resetClient(state);
+      throw err;
+    }
+  }
+
   private async loadCache(state: RelayState) {
     try {
       const parsed = JSON.parse(await readFile(toolsCachePath(state.config.id), 'utf8'));
@@ -357,6 +461,8 @@ export class RelayManager {
     const client = state.client;
     state.client = undefined;
     state.connecting = undefined;
+    state.menuStatus = undefined;
+    state.menuCachedAt = 0;
     if (client) void client.close().catch(() => {});
   }
 
@@ -372,6 +478,173 @@ export class RelayManager {
       name: localToolName(serverId, tool.name),
       description: `[${serverId}] ${tool.description || tool.name}`,
     };
+  }
+}
+
+function findMenuStatusTool(state: RelayState) {
+  const names = new Set(state.cachedTools.map((tool) => tool.name));
+  if (names.has('relay_menu_status')) return 'relay_menu_status';
+  const serverSpecific = `${state.config.id}_menu_status`;
+  if (names.has(serverSpecific)) return serverSpecific;
+  return undefined;
+}
+
+async function fetchMenuStatusUrl(url: string) {
+  assertLocalHttpActionUrl(url);
+  const response = await fetch(url, { method: 'GET' });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`menu status endpoint failed: ${response.status} ${text}`);
+  return text ? JSON.parse(text) : {};
+}
+
+function parseToolJson(result: unknown) {
+  const content = (result as { content?: Array<{ type?: string; text?: string }> })?.content;
+  const text = Array.isArray(content)
+    ? content.find((item) => item?.type === 'text' && typeof item.text === 'string')?.text
+    : undefined;
+  if (!text) throw new Error('menu status tool did not return text JSON');
+  return JSON.parse(text);
+}
+
+function normalizeMenuStatus(state: RelayState, input: unknown, lastError: string): RelayMenuStatus {
+  const fallback = fallbackMenuStatus(state, lastError);
+  const raw = input && typeof input === 'object' ? (input as Partial<RelayMenuStatus>) : {};
+  return {
+    id: state.config.id,
+    title: stringOr(raw.title, fallback.title),
+    summary: stringOr(raw.summary, fallback.summary),
+    state: normalizeMenuState(raw.state, fallback.state),
+    detail: normalizeDetail(raw.detail, fallback.detail),
+    actions: normalizeMenuActions([...(Array.isArray(raw.actions) ? raw.actions : []), ...(state.config.menu?.actions || [])]),
+    cachedAt: Date.now(),
+    lastError,
+  };
+}
+
+function fallbackMenuStatus(state: RelayState, lastError: string): RelayMenuStatus {
+  const enabled = state.config.enabled !== false;
+  const stateName: RelayMenuState = !enabled
+    ? 'paused'
+    : state.lastRefreshError || lastError
+      ? 'error'
+      : state.client
+        ? 'ready'
+        : 'unknown';
+  const detail = [
+    `${state.cachedTools.length} cached tools`,
+    state.cachedAt ? `Tools cached at ${new Date(state.cachedAt).toISOString()}` : 'Tools not cached yet',
+  ];
+  if (state.lastRefreshError) detail.push(`Last refresh error: ${state.lastRefreshError}`);
+  if (lastError) detail.push(`Menu error: ${lastError}`);
+  return {
+    id: state.config.id,
+    title: state.config.name || state.config.id,
+    summary: enabled
+      ? `${state.client ? 'Connected' : 'Not connected'} - ${state.cachedTools.length} tools`
+      : 'Disabled',
+    state: stateName,
+    detail,
+    actions: normalizeMenuActions(state.config.menu?.actions || []),
+    cachedAt: Date.now(),
+    lastError,
+  };
+}
+
+function normalizeMenuState(value: unknown, fallback: RelayMenuState): RelayMenuState {
+  return value === 'ready' ||
+    value === 'running' ||
+    value === 'paused' ||
+    value === 'attention' ||
+    value === 'error' ||
+    value === 'unknown'
+    ? value
+    : fallback;
+}
+
+function normalizeMenuActions(actions: unknown[]): RelayMenuAction[] {
+  return actions.flatMap((input) => {
+    const action = input as RelayMenuAction;
+    if (!action || typeof action !== 'object') return [];
+    if (!action.id || !/^[a-zA-Z0-9_-]+$/.test(action.id)) return [];
+    if (!action.label || typeof action.label !== 'string') return [];
+    if (action.url) {
+      try {
+        if (action.method) {
+          if (!isMenuActionMethod(action.method)) return [];
+          assertLocalHttpActionUrl(action.url);
+        } else {
+          assertDisplayActionUrl(action.url);
+        }
+      } catch {
+        return [];
+      }
+    }
+    if (action.tool && action.url) return [];
+    if (!action.tool && !action.url) return [];
+    return [
+      {
+        id: action.id,
+        label: action.label,
+        systemImage: typeof action.systemImage === 'string' ? action.systemImage : undefined,
+        confirm: action.confirm === true,
+        tool: typeof action.tool === 'string' ? action.tool : undefined,
+        args: action.args && typeof action.args === 'object' && !Array.isArray(action.args) ? action.args : undefined,
+        url: typeof action.url === 'string' ? action.url : undefined,
+        method: action.method,
+      },
+    ];
+  });
+}
+
+function isMenuActionMethod(value: unknown): value is RelayMenuAction['method'] {
+  return value === 'GET' || value === 'POST' || value === 'PUT' || value === 'PATCH' || value === 'DELETE';
+}
+
+function normalizeDetail(value: unknown, fallback: string[]) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : fallback;
+}
+
+function stringOr(value: unknown, fallback: string) {
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+function normalizeActionRequest(input: unknown) {
+  const body = input && typeof input === 'object' ? (input as { confirm?: unknown; args?: unknown }) : {};
+  return {
+    confirm: body.confirm === true,
+    args: body.args && typeof body.args === 'object' && !Array.isArray(body.args) ? (body.args as Record<string, unknown>) : {},
+  };
+}
+
+async function callLocalHttpAction(action: RelayMenuAction, args: Record<string, unknown>) {
+  assertLocalHttpActionUrl(action.url!);
+  const method = action.method || 'POST';
+  const hasBody = method !== 'GET' && method !== 'DELETE';
+  const response = await fetch(action.url!, {
+    method,
+    headers: hasBody ? { 'content-type': 'application/json' } : undefined,
+    body: hasBody ? JSON.stringify(args) : undefined,
+  });
+  const text = await response.text();
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = text;
+  }
+  return { ok: response.ok, status: response.status, body };
+}
+
+function assertDisplayActionUrl(raw: string) {
+  const url = new URL(raw);
+  if (url.protocol === 'file:') return;
+  assertLocalHttpActionUrl(raw);
+}
+
+function assertLocalHttpActionUrl(raw: string) {
+  const url = new URL(raw);
+  if (url.protocol !== 'http:' || (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost')) {
+    throw new Error('Menu HTTP actions must target http://127.0.0.1 or http://localhost');
   }
 }
 
@@ -430,6 +703,30 @@ const serverSchema = {
     cache: {
       type: 'object',
       properties: { toolsTtlMs: { type: 'number' } },
+    },
+    menu: {
+      type: 'object',
+      properties: {
+        statusUrl: { type: 'string' },
+        ttlMs: { type: 'number' },
+        actions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              label: { type: 'string' },
+              systemImage: { type: 'string' },
+              confirm: { type: 'boolean' },
+              tool: { type: 'string' },
+              args: { type: 'object' },
+              url: { type: 'string' },
+              method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+            },
+            required: ['id', 'label'],
+          },
+        },
+      },
     },
   },
   required: ['id', 'remote'],

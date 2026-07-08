@@ -30,3 +30,65 @@ test('rejects invalid server id', () => {
     }),
   );
 });
+
+test('normalizes local menu config', () => {
+  const config = normalizeConfig({
+    servers: [
+      {
+        id: 'mail',
+        remote: { type: 'streamable_http', url: 'https://example.com/mcp' },
+        menu: {
+          statusUrl: 'http://127.0.0.1:3765/status',
+          ttlMs: 5000,
+          actions: [
+            {
+              id: 'sync_now',
+              label: 'Sync Now',
+              method: 'POST',
+              url: 'http://localhost:3765/sync',
+              confirm: true,
+            },
+            {
+              id: 'open_index',
+              label: 'Open Index',
+              url: 'file:///tmp/index',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  assert.equal(config.servers[0].menu?.statusUrl, 'http://127.0.0.1:3765/status');
+  assert.equal(config.servers[0].menu?.ttlMs, 5000);
+  assert.equal(config.servers[0].menu?.actions?.[0].method, 'POST');
+  assert.equal(config.servers[0].menu?.actions?.[0].confirm, true);
+});
+
+test('rejects non-local menu admin urls', () => {
+  assert.throws(() =>
+    normalizeConfig({
+      servers: [
+        {
+          id: 'bad',
+          remote: { type: 'streamable_http', url: 'https://example.com/mcp' },
+          menu: {
+            statusUrl: 'https://example.com/status',
+          },
+        },
+      ],
+    }),
+  );
+  assert.throws(() =>
+    normalizeConfig({
+      servers: [
+        {
+          id: 'bad',
+          remote: { type: 'streamable_http', url: 'https://example.com/mcp' },
+          menu: {
+            actions: [{ id: 'call', label: 'Call', method: 'POST', url: 'http://example.com/call' }],
+          },
+        },
+      ],
+    }),
+  );
+});

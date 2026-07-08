@@ -1,7 +1,14 @@
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { defaultConfigPath, stateDir } from './paths.js';
-import type { RelayConfig, RelayMode, RelayServerConfig } from './types.js';
+import type {
+  RelayConfig,
+  RelayMenuAction,
+  RelayMenuActionMethod,
+  RelayMenuConfig,
+  RelayMode,
+  RelayServerConfig,
+} from './types.js';
 
 export const defaultAdmin = {
   host: '127.0.0.1',
@@ -54,7 +61,78 @@ export function normalizeServer(input: RelayServerConfig): RelayServerConfig {
     cache: {
       toolsTtlMs: Number(input.cache?.toolsTtlMs || 15 * 60 * 1000),
     },
+    menu: normalizeMenu(input.menu),
   };
+}
+
+function normalizeMenu(input: unknown): RelayMenuConfig | undefined {
+  if (input === undefined) return undefined;
+  if (!input || typeof input !== 'object') throw new Error('menu config must be an object');
+  const menu = input as RelayMenuConfig;
+  if (menu.statusUrl) assertLocalHttpUrl(menu.statusUrl, 'menu.statusUrl');
+  const actions = Array.isArray(menu.actions) ? menu.actions.map(normalizeMenuAction) : undefined;
+  return {
+    statusUrl: menu.statusUrl,
+    ttlMs: Number(menu.ttlMs || 15_000),
+    actions,
+  };
+}
+
+function normalizeMenuAction(input: RelayMenuAction): RelayMenuAction {
+  if (!input || typeof input !== 'object') throw new Error('menu.actions entries must be objects');
+  if (!input.id || !/^[a-zA-Z0-9_-]+$/.test(input.id)) {
+    throw new Error('menu action id is required and must contain only letters, numbers, _ or -');
+  }
+  if (!input.label || typeof input.label !== 'string') {
+    throw new Error(`menu action ${input.id} label is required`);
+  }
+  const action: RelayMenuAction = {
+    id: input.id,
+    label: input.label,
+    systemImage: input.systemImage,
+    confirm: input.confirm === true,
+  };
+  if (input.tool) action.tool = input.tool;
+  if (input.args && typeof input.args === 'object' && !Array.isArray(input.args)) {
+    action.args = input.args;
+  }
+  if (input.url) {
+    if (input.method) assertLocalHttpUrl(input.url, `menu action ${input.id} url`);
+    else assertLocalDisplayUrl(input.url, `menu action ${input.id} url`);
+    action.url = input.url;
+  }
+  if (input.method) {
+    action.method = normalizeMethod(input.method);
+    if (!action.url) throw new Error(`menu action ${input.id} method requires url`);
+  }
+  if (action.tool && action.url) {
+    throw new Error(`menu action ${input.id} must use only one of tool or url`);
+  }
+  if (!action.tool && !action.url) {
+    throw new Error(`menu action ${input.id} requires tool or url`);
+  }
+  return action;
+}
+
+function normalizeMethod(method: unknown): RelayMenuActionMethod {
+  if (method === 'GET' || method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+    return method;
+  }
+  throw new Error('menu action method must be GET, POST, PUT, PATCH, or DELETE');
+}
+
+function assertLocalDisplayUrl(raw: string, label: string) {
+  const url = new URL(raw);
+  if (url.protocol === 'file:') return;
+  assertLocalHttpUrl(raw, label);
+}
+
+function assertLocalHttpUrl(raw: string, label: string) {
+  const url = new URL(raw);
+  if (url.protocol !== 'http:') throw new Error(`${label} must use http://127.0.0.1, http://localhost, or file:`);
+  if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
+    throw new Error(`${label} must target 127.0.0.1 or localhost`);
+  }
 }
 
 export async function readConfig(path = defaultConfigPath()): Promise<RelayConfig> {
