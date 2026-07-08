@@ -1,8 +1,23 @@
 # mcp-local-relay
 
+[![npm version](https://img.shields.io/npm/v/@unsoldgroup/mcp-local-relay?logo=npm&color=cb3837)](https://www.npmjs.com/package/@unsoldgroup/mcp-local-relay)
+[![npm downloads](https://img.shields.io/npm/dm/@unsoldgroup/mcp-local-relay?logo=npm&color=cb3837)](https://www.npmjs.com/package/@unsoldgroup/mcp-local-relay)
+[![GitHub stars](https://img.shields.io/github/stars/unsoldgroup/mcp-local-relay?logo=github)](https://github.com/unsoldgroup/mcp-local-relay/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/unsoldgroup/mcp-local-relay?logo=github)](https://github.com/unsoldgroup/mcp-local-relay/network/members)
+[![CI](https://github.com/unsoldgroup/mcp-local-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/unsoldgroup/mcp-local-relay/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Node](https://img.shields.io/badge/node-%E2%89%A524-3c873a)
+
 Persistent local MCP relay for developer machines.
 
 `mcp-local-relay` runs once on localhost, connects to remote MCP servers in the background, caches tool discovery, exposes health/status, and lets agents hot-add or refresh upstream MCP servers through MCP tools. It is meant to make clients like Codex, Claude, Cursor, and desktop apps point at one fast local MCP endpoint instead of each paying remote startup/auth/tool-list costs.
+
+> **Status: v0.1 — public initial release.** Streamable HTTP upstreams, cached
+> tool discovery, hot-swap MCP onboarding tools, PostHog CLI-mode preset,
+> macOS LaunchAgent helpers, and JSON health/status endpoints are implemented.
+> The optional macOS status bar app is designed but not yet shipped. Start with
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+> [docs/STATUS-BAR.md](docs/STATUS-BAR.md).
 
 ## Why
 
@@ -14,6 +29,14 @@ Raw MCP clients often do eager startup discovery. Remote or large MCP servers ca
 - LaunchAgent lifecycle and logs on macOS
 - `/healthz` and `/status`
 - hot-swap onboarding via MCP management tools
+
+## How it works
+
+1. **One local MCP endpoint** — clients connect once to `127.0.0.1`.
+2. **Persistent upstreams** — remote MCP servers stay warm outside the client process.
+3. **Cached discovery** — `tools/list` is served from a local cache while refreshes happen in the background.
+4. **Hot-swap onboarding** — agents use `relay_*` MCP tools to add, validate, refresh, enable, or disable upstream servers.
+5. **Observable runtime** — LaunchAgent logs plus `/healthz` and `/status` make failures inspectable.
 
 ## Install
 
@@ -91,3 +114,34 @@ curl http://127.0.0.1:3764/status
 ```
 
 The optional macOS status bar app is planned as a small SwiftUI app that reads `/status`.
+
+## Documentation
+
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — relay shape, tool naming, and hot-swap flow.
+- **[docs/STATUS-BAR.md](docs/STATUS-BAR.md)** — design notes for the optional macOS menu bar monitor.
+- **[SECURITY.md](.github/SECURITY.md)** — private disclosure and secret-handling posture.
+- **[SUPPORT.md](.github/SUPPORT.md)** — what to include in bug reports.
+
+## About
+
+Built by **[Unsold Group](https://unsold.group)** — a group of innovative travel brands leveraging AI to improve customer experience and operations.
+
+This project came out of production work on **[Expedition Insure](https://expedition.insure)**, Unsold Group's travel insurance platform for polar, expedition, and adventure travel. Expedition Insure uses agent workflows, MCP tools, local context systems, and operational automations every day; `mcp-local-relay` packages one of the infrastructure patterns that made those workflows faster and more reliable.
+
+If you are building with AI agents in a real operational environment, follow:
+
+- **[unsold.group](https://unsold.group)** — innovative travel brands using AI to deliver better customer experiences.
+- **[expedition.insure](https://expedition.insure)** — expedition and adventure travel insurance for polar, remote, and hard-to-place trips.
+
+## Feedback & contact
+
+There is no telemetry. We only know what users report.
+
+- **[Discussions](https://github.com/unsoldgroup/mcp-local-relay/discussions)** — questions, ideas, and integration notes.
+- **[Issues](https://github.com/unsoldgroup/mcp-local-relay/issues)** — bugs and feature requests.
+- Security/privacy issues → **[SECURITY.md](.github/SECURITY.md)**.
+- More from the builders → **[unsold.group](https://unsold.group)**.
+
+## License
+
+[MIT](LICENSE)
