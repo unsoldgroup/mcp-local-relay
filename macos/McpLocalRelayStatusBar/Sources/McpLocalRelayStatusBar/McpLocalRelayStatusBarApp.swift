@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 private var retainedActionPanels: [NSPanel] = []
+private let actionPanelDelegate = ActionPanelDelegate()
 
 @main
 struct McpLocalRelayStatusBarApp: App {
@@ -354,7 +355,9 @@ struct ServerMenu: View {
                     ForEach(menu.actions) { action in
                         Button {
                             if let view = action.view {
-                                showRelayViewWindow(title: action.label, view: view)
+                                DispatchQueue.main.async {
+                                    showRelayViewWindow(title: action.label, view: view)
+                                }
                                 return
                             }
                             if let url = action.url, action.tool == nil, action.input == nil, let parsed = URL(string: url) {
@@ -444,7 +447,16 @@ func showTextWindow(title: String, text: String) {
 }
 
 func retainActionPanel(_ panel: NSPanel) {
+    panel.isReleasedWhenClosed = false
+    panel.delegate = actionPanelDelegate
     retainedActionPanels.append(panel)
+}
+
+final class ActionPanelDelegate: NSObject, NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        guard let panel = notification.object as? NSPanel else { return }
+        retainedActionPanels.removeAll { $0 === panel }
+    }
 }
 
 func floatingPanel(title: String, width: CGFloat, height: CGFloat) -> NSPanel {
