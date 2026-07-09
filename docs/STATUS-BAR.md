@@ -72,6 +72,51 @@ The tool should return text JSON:
 
 Tool actions name upstream tools. The relay calls them against the selected upstream server and merges configured action `args` with request `args`.
 
+## Compact Views
+
+Menu actions may include a small `view` payload for at-a-glance data. The status bar app renders this inline as a compact submenu instead of executing a tool call. Keep payloads capped; do not stream full logs or ledgers through the menu model.
+
+```json
+{
+  "id": "open_ledger",
+  "label": "Open Ledger",
+  "systemImage": "list.bullet.rectangle",
+  "view": {
+    "type": "table",
+    "title": "Corpus Ledger",
+    "summary": "42 done - 0 failed - 1 needs human",
+    "refreshSeconds": 10,
+    "density": "compact",
+    "columns": [
+      { "id": "status", "label": "", "kind": "status" },
+      { "id": "plan", "label": "Plan" },
+      { "id": "state", "label": "State" },
+      { "id": "result", "label": "Result" },
+      { "id": "age", "label": "Age" }
+    ],
+    "rows": [
+      {
+        "status": "success",
+        "plan": "Safe Travels Sailaway Essential",
+        "state": "OR",
+        "result": "done",
+        "age": "6m ago"
+      }
+    ],
+    "footerActions": [
+      {
+        "id": "open_full_ledger",
+        "label": "Open Full Ledger",
+        "systemImage": "arrow.up.forward.app",
+        "url": "file:///Users/al/code/insurance-corpus/eval/batch/codex-ledger.jsonl"
+      }
+    ]
+  }
+}
+```
+
+Supported row status tokens are `success`, `running`, `warning`, `error`, `paused`, and `neutral`. Servers provide semantics only; the native app chooses icons and colors.
+
 ## Configured Local Admin Actions
 
 For local HTTP admin surfaces, a server config may include menu metadata:

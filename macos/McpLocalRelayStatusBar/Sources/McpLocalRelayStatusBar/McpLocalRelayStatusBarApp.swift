@@ -347,20 +347,28 @@ struct ServerMenu: View {
                     Text("No quick actions")
                 } else {
                     ForEach(menu.actions) { action in
-                        Button {
-                            if let url = action.url, let parsed = URL(string: url) {
-                                NSWorkspace.shared.open(parsed)
-                            } else {
-                                Task {
-                                    await model.runMenuAction(
-                                        serverId: server.id,
-                                        actionId: action.id,
-                                        confirm: action.confirm
-                                    )
-                                }
+                        if let view = action.view {
+                            Menu {
+                                CompactRelayView(view: view)
+                            } label: {
+                                Label(action.label, systemImage: action.systemImage ?? "tablecells")
                             }
-                        } label: {
-                            Label(action.label, systemImage: action.systemImage ?? "bolt")
+                        } else {
+                            Button {
+                                if let url = action.url, let parsed = URL(string: url) {
+                                    NSWorkspace.shared.open(parsed)
+                                } else {
+                                    Task {
+                                        await model.runMenuAction(
+                                            serverId: server.id,
+                                            actionId: action.id,
+                                            confirm: action.confirm
+                                        )
+                                    }
+                                }
+                            } label: {
+                                Label(action.label, systemImage: action.systemImage ?? "bolt")
+                            }
                         }
                     }
                 }
@@ -384,6 +392,41 @@ struct ServerMenu: View {
             }
         } label: {
             Label(menu?.compactTitle ?? server.compactTitle, systemImage: menu?.systemImage ?? server.statusIcon)
+        }
+    }
+}
+
+struct CompactRelayView: View {
+    let view: RelayActionView
+
+    var body: some View {
+        if !view.summary.isEmpty {
+            Label(view.summary, systemImage: "chart.bar.doc.horizontal")
+        } else {
+            Label(view.title, systemImage: "tablecells")
+        }
+        if let refreshSeconds = view.refreshSeconds {
+            Text("Refreshes every \(refreshSeconds)s")
+        }
+        Divider()
+        if view.rows.isEmpty {
+            Text("No rows")
+        } else {
+            ForEach(Array(view.rows.prefix(8).enumerated()), id: \.offset) { _, row in
+                Label(row.display(columns: view.columns), systemImage: row.statusIcon)
+            }
+        }
+        if !view.footerActions.isEmpty {
+            Divider()
+            ForEach(view.footerActions) { action in
+                Button {
+                    if let parsed = URL(string: action.url) {
+                        NSWorkspace.shared.open(parsed)
+                    }
+                } label: {
+                    Label(action.label, systemImage: action.systemImage ?? "arrow.up.forward.app")
+                }
+            }
         }
     }
 }
@@ -470,9 +513,10 @@ struct RelayMenuAction: Decodable, Identifiable {
     let confirm: Bool
     let tool: String?
     let url: String?
+    let view: RelayActionView?
 
     private enum CodingKeys: String, CodingKey {
-        case id, label, systemImage, confirm, tool, url
+        case id, label, systemImage, confirm, tool, url, view
     }
 
     init(from decoder: Decoder) throws {
@@ -483,6 +527,103 @@ struct RelayMenuAction: Decodable, Identifiable {
         confirm = try c.decodeIfPresent(Bool.self, forKey: .confirm) ?? false
         tool = try c.decodeIfPresent(String.self, forKey: .tool)
         url = try c.decodeIfPresent(String.self, forKey: .url)
+        view = try c.decodeIfPresent(RelayActionView.self, forKey: .view)
+    }
+}
+
+struct RelayActionView: Decodable {
+    let type: String
+    let title: String
+    let summary: String
+    let refreshSeconds: Int?
+    let density: String?
+    let columns: [RelayViewColumn]
+    let rows: [RelayViewRow]
+    let footerActions: [RelayViewFooterAction]
+
+    private enum CodingKeys: String, CodingKey {
+        case type, title, summary, refreshSeconds, density, columns, rows, footerActions
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        type = try c.decode(String.self, forKey: .type)
+        title = try c.decode(String.self, forKey: .title)
+        summary = try c.decodeIfPresent(String.self, forKey: .summary) ?? ""
+        refreshSeconds = try c.decodeIfPresent(Int.self, forKey: .refreshSeconds)
+        density = try c.decodeIfPresent(String.self, forKey: .density)
+        columns = try c.decodeIfPresent([RelayViewColumn].self, forKey: .columns) ?? []
+        rows = try c.decodeIfPresent([RelayViewRow].self, forKey: .rows) ?? []
+        footerActions = try c.decodeIfPresent([RelayViewFooterAction].self, forKey: .footerActions) ?? []
+    }
+}
+
+struct RelayViewColumn: Decodable {
+    let id: String
+    let label: String
+    let kind: String?
+}
+
+struct RelayViewRow: Decodable {
+    let values: [String: String]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: DynamicCodingKey.self)
+        var next: [String: String] = [:]
+        for key in c.allKeys {
+            if let string = try? c.decode(String.self, forKey: key) {
+                next[key.stringValue] = string
+            } else if let int = try? c.decode(Int.self, forKey: key) {
+                next[key.stringValue] = String(int)
+            } else if let double = try? c.decode(Double.self, forKey: key) {
+                next[key.stringValue] = String(double)
+            } else if let bool = try? c.decode(Bool.self, forKey: key) {
+                next[key.stringValue] = bool ? "true" : "false"
+            }
+        }
+        values = next
+    }
+
+    var statusIcon: String {
+        switch values["status"]?.lowercased() {
+        case "success": return "checkmark.circle.fill"
+        case "running": return "arrow.triangle.2.circlepath.circle.fill"
+        case "warning": return "exclamationmark.triangle.fill"
+        case "error": return "xmark.octagon.fill"
+        case "paused": return "pause.circle.fill"
+        default: return "circle.fill"
+        }
+    }
+
+    func display(columns: [RelayViewColumn]) -> String {
+        let visibleColumns = columns.filter { $0.kind != "status" }
+        let ordered = visibleColumns.isEmpty ? values.keys.sorted() : visibleColumns.map(\.id)
+        return ordered
+            .compactMap { values[$0] }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+}
+
+struct RelayViewFooterAction: Decodable, Identifiable {
+    let id: String
+    let label: String
+    let systemImage: String?
+    let url: String
+}
+
+struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
     }
 }
 
