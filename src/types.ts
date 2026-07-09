@@ -14,6 +14,7 @@ export interface RelayRemoteConfig {
 
 export interface RelayCacheConfig {
   toolsTtlMs?: number;
+  autoRefreshMs?: number;
 }
 
 export type RelayMenuState = 'ready' | 'running' | 'paused' | 'attention' | 'error' | 'unknown';
@@ -98,8 +99,16 @@ export interface RelayAdminConfig {
   mcpPath?: string;
 }
 
+export interface RelayUpdateConfig {
+  autoUpgrade?: boolean;
+  checkIntervalMs?: number;
+  packageManager?: string;
+  registryUrl?: string;
+}
+
 export interface RelayConfig {
   admin?: RelayAdminConfig;
+  updates?: RelayUpdateConfig;
   servers: RelayServerConfig[];
 }
 
@@ -119,6 +128,8 @@ export interface RelayServerStatus {
   connected: boolean;
   cachedTools: number;
   cachedAt: number;
+  autoRefreshMs: number;
+  nextAutoRefreshAt: number;
   lastRefreshAttemptAt: number;
   lastRefreshError: string;
 }
@@ -129,6 +140,19 @@ export interface RelayStatus {
   uptimeMs: number;
   sessions: number;
   servers: RelayServerStatus[];
+  updates?: RelayUpdateStatus;
+  events?: Array<Record<string, unknown>>;
+}
+
+export interface RelayUpdateStatus {
+  enabled: boolean;
+  checkIntervalMs: number;
+  currentVersion: string;
+  latestVersion: string;
+  lastCheckAt: number;
+  nextCheckAt: number;
+  lastUpdateAt: number;
+  lastError: string;
 }
 
 export interface RelayMenuStatus {

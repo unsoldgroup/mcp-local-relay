@@ -5,7 +5,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { readConfig } from './config.js';
 import { launchctl } from './launchd.js';
+import { RelayLogger, errorFields } from './logger.js';
 import { RelayManager } from './relay-manager.js';
+import { UpdateManager } from './updater.js';
 
 export interface ServeOptions {
   configPath: string;
@@ -16,7 +18,15 @@ export async function serve(options: ServeOptions) {
   const host = config.admin?.host || '127.0.0.1';
   const port = Number(config.admin?.port || 3764);
   const mcpPath = config.admin?.mcpPath || '/mcp';
-  const manager = new RelayManager(config, options.configPath);
+  const logger = new RelayLogger();
+  const manager = new RelayManager(config, options.configPath, logger);
+  const updater = new UpdateManager(config.updates || {}, logger, async () => {
+    setTimeout(() => {
+      void launchctl('kickstart').catch((err) => {
+        logger.error('update_restart_failed', errorFields(err));
+      });
+    }, 25);
+  });
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const servers = new Map<string, McpServer>();
 
@@ -26,6 +36,7 @@ export async function serve(options: ServeOptions) {
     }
   });
   await manager.start();
+  await updater.start();
 
   async function closeSession(transport: StreamableHTTPServerTransport) {
     const sid = transport.sessionId;
@@ -76,7 +87,16 @@ export async function serve(options: ServeOptions) {
         return;
       }
       if (req.method === 'GET' && url.pathname === '/status') {
-        json(res, 200, manager.status(transports.size));
+        json(res, 200, manager.status(transports.size, updater.status()));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/events') {
+        const limit = Number(url.searchParams.get('limit') || 100);
+        json(res, 200, { ok: true, events: logger.recent(limit) });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/update-check') {
+        json(res, 200, await updater.checkOnce());
         return;
       }
       if (req.method === 'GET' && url.pathname === '/menu') {
@@ -151,12 +171,19 @@ export async function serve(options: ServeOptions) {
       await handleMcp(req, res, await readJsonBody(req));
     })().catch((err) => {
       const message = err instanceof Error ? err.message : String(err);
+      logger.error('admin_request_failed', {
+        method: req.method,
+        url: req.url,
+        ...errorFields(err),
+      });
       if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message }, id: null }));
     });
   });
 
   async function shutdown() {
+    updater.stop();
+    manager.stop();
     for (const transport of transports.values()) await transport.close();
     for (const server of servers.values()) await server.close();
     httpServer.close(() => process.exit(0));
@@ -165,7 +192,7 @@ export async function serve(options: ServeOptions) {
   process.on('SIGTERM', () => void shutdown());
 
   await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
-  process.stderr.write(`mcp-local-relay: listening on http://${host}:${port}${mcpPath}\n`);
+  logger.info('relay_listening', { url: `http://${host}:${port}${mcpPath}`, configPath: options.configPath });
   return { httpServer, manager };
 }
 

@@ -21,7 +21,7 @@ test('serves status bar admin endpoints without secrets', async (t) => {
   const configPath = join(dir, 'config.json');
   await writeConfig({ admin: { host: '127.0.0.1', port, mcpPath: '/mcp' }, servers: [] }, configPath);
 
-  const { httpServer } = await serve({ configPath });
+  const service = await serve({ configPath });
   try {
     const statusResponse = await fetch(`http://127.0.0.1:${port}/status`);
     assert.equal(statusResponse.status, 200);
@@ -31,12 +31,15 @@ test('serves status bar admin endpoints without secrets', async (t) => {
       uptimeMs: number;
       sessions: number;
       servers: unknown[];
+      updates?: { enabled?: boolean; checkIntervalMs?: number };
     };
     assert.equal(status.ok, true);
     assert.equal(status.name, 'mcp-local-relay');
     assert.equal(typeof status.uptimeMs, 'number');
     assert.equal(status.sessions, 0);
     assert.deepEqual(status.servers, []);
+    assert.equal(status.updates?.enabled, false);
+    assert.equal(status.updates?.checkIntervalMs, 86_400_000);
 
     const configResponse = await fetch(`http://127.0.0.1:${port}/client-config`);
     assert.equal(configResponse.status, 200);
@@ -44,7 +47,8 @@ test('serves status bar admin endpoints without secrets', async (t) => {
     assert.match(clientConfig, new RegExp(`http://127\\.0\\.0\\.1:${port}/mcp`));
     assert.doesNotMatch(clientConfig, /TOKEN|SECRET|PASSWORD|Authorization/i);
   } finally {
-    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    service.manager.stop();
+    await new Promise<void>((resolve) => service.httpServer.close(() => resolve()));
     await rm(dir, { recursive: true, force: true });
   }
 });

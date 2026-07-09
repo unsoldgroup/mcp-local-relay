@@ -62,6 +62,25 @@ mcp-local-relayctl upgrade
 
 The LaunchAgent points at the installed global CLI path, so upgrading the package and restarting the agent moves every client session to the latest relay without changing client MCP config. If your global install uses a specific package manager, pass `--package-manager pnpm`, `npm`, `yarn`, or `bun`.
 
+To let the LaunchAgent-backed relay keep itself on the latest published npm
+version, opt in from `~/.config/mcp-local-relay/config.json`:
+
+```json
+{
+  "updates": {
+    "autoUpgrade": true,
+    "checkIntervalMs": 86400000,
+    "packageManager": "pnpm"
+  },
+  "servers": []
+}
+```
+
+When enabled, the relay checks npm on `updates.checkIntervalMs`, runs the same
+package-manager command as `mcp-local-relayctl upgrade` if a newer version
+exists, and restarts the LaunchAgent. Use `mcp-local-relayctl update-check` to
+trigger a manual check through the running relay.
+
 For development from a checkout:
 
 ```sh
@@ -109,10 +128,15 @@ An upstream server config looks like this:
   },
   "envFile": "~/.config/mcp-local-relay/posthog.env",
   "cache": {
-    "toolsTtlMs": 900000
+    "toolsTtlMs": 900000,
+    "autoRefreshMs": 900000
   }
 }
 ```
+
+`cache.autoRefreshMs` keeps enabled upstream MCP servers warm and refreshes
+their tool lists in the background. It defaults to `toolsTtlMs`; set it to `0`
+to disable automatic refresh for a server.
 
 ### Warm Add From An Agent
 
@@ -190,6 +214,7 @@ Stdio MCP is simple, but each client process pays startup, auth, and discovery c
 
 ```sh
 mcp-local-relayctl status
+mcp-local-relayctl update-check
 mcp-local-relayctl logs
 curl http://127.0.0.1:3764/status
 ```
