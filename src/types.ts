@@ -18,6 +18,46 @@ export interface RelayCacheConfig {
 
 export type RelayMenuState = 'ready' | 'running' | 'paused' | 'attention' | 'error' | 'unknown';
 export type RelayMenuActionMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+export type RelayViewStatus = 'success' | 'running' | 'warning' | 'error' | 'paused' | 'neutral';
+
+export interface RelayActionViewColumn {
+  id: string;
+  label: string;
+  kind?: 'status' | 'text';
+}
+
+export interface RelayActionViewFooterAction {
+  id: string;
+  label: string;
+  systemImage?: string;
+  url: string;
+}
+
+export interface RelayActionView {
+  type: 'table' | 'list' | 'summary';
+  title: string;
+  summary?: string;
+  refreshSeconds?: number;
+  density?: 'compact' | 'normal';
+  columns?: RelayActionViewColumn[];
+  rows?: Array<Record<string, string | number | boolean | null>>;
+  footerActions?: RelayActionViewFooterAction[];
+}
+
+export interface RelayActionInputField {
+  id: string;
+  label: string;
+  type?: 'string' | 'number' | 'boolean';
+  placeholder?: string;
+  default?: string | number | boolean;
+  required?: boolean;
+}
+
+export interface RelayActionInput {
+  title?: string;
+  submitLabel?: string;
+  fields: RelayActionInputField[];
+}
 
 export interface RelayMenuAction {
   id: string;
@@ -28,6 +68,8 @@ export interface RelayMenuAction {
   args?: Record<string, unknown>;
   url?: string;
   method?: RelayMenuActionMethod;
+  view?: RelayActionView;
+  input?: RelayActionInput;
 }
 
 export interface RelayMenuConfig {

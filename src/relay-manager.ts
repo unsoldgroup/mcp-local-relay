@@ -14,6 +14,7 @@ import { loadEnvFile } from './env-file.js';
 import { normalizeConfig, normalizeServer, toolsCachePath, writeConfig } from './config.js';
 import type {
   RelayConfig,
+  RelayActionInputField,
   RelayMenuAction,
   RelayMenuState,
   RelayMenuStatus,
@@ -581,8 +582,10 @@ function normalizeMenuActions(actions: unknown[]): RelayMenuAction[] {
         return [];
       }
     }
+    const view = normalizeActionView(action.view);
+    const inputSpec = normalizeActionInput(action.input);
     if (action.tool && action.url) return [];
-    if (!action.tool && !action.url) return [];
+    if (!action.tool && !action.url && !view) return [];
     return [
       {
         id: action.id,
@@ -593,9 +596,69 @@ function normalizeMenuActions(actions: unknown[]): RelayMenuAction[] {
         args: action.args && typeof action.args === 'object' && !Array.isArray(action.args) ? action.args : undefined,
         url: typeof action.url === 'string' ? action.url : undefined,
         method: action.method,
+        view,
+        input: inputSpec,
       },
     ];
   });
+}
+
+function normalizeActionView(view: unknown): RelayMenuAction['view'] {
+  if (!view || typeof view !== 'object' || Array.isArray(view)) return undefined;
+  const raw = view as NonNullable<RelayMenuAction['view']>;
+  if (!raw.type || !raw.title) return undefined;
+  const footerActions = Array.isArray(raw.footerActions)
+    ? raw.footerActions.flatMap((action) => {
+        if (!action?.id || !action.label || !action.url) return [];
+        try {
+          assertDisplayActionUrl(action.url);
+        } catch {
+          return [];
+        }
+        return [{
+          id: String(action.id),
+          label: String(action.label),
+          systemImage: typeof action.systemImage === 'string' ? action.systemImage : undefined,
+          url: String(action.url),
+        }];
+      })
+    : undefined;
+  return {
+    type: raw.type,
+    title: raw.title,
+    summary: typeof raw.summary === 'string' ? raw.summary : undefined,
+    refreshSeconds: typeof raw.refreshSeconds === 'number' ? raw.refreshSeconds : undefined,
+    density: raw.density,
+    columns: Array.isArray(raw.columns) ? raw.columns : undefined,
+    rows: Array.isArray(raw.rows) ? raw.rows.slice(0, 20) : undefined,
+    footerActions,
+  };
+}
+
+function normalizeActionInput(input: unknown): RelayMenuAction['input'] {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const raw = input as NonNullable<RelayMenuAction['input']>;
+  if (!Array.isArray(raw.fields)) return undefined;
+  const fields = raw.fields.flatMap((field) => {
+    if (!field?.id || !field.label) return [];
+    const type: RelayActionInputField['type'] = field.type === 'number' || field.type === 'boolean' ? field.type : 'string';
+    return [{
+      id: String(field.id),
+      label: String(field.label),
+      type,
+      placeholder: typeof field.placeholder === 'string' ? field.placeholder : undefined,
+      default: typeof field.default === 'string' || typeof field.default === 'number' || typeof field.default === 'boolean'
+        ? field.default
+        : undefined,
+      required: field.required === true,
+    }];
+  });
+  if (fields.length === 0) return undefined;
+  return {
+    title: typeof raw.title === 'string' ? raw.title : undefined,
+    submitLabel: typeof raw.submitLabel === 'string' ? raw.submitLabel : undefined,
+    fields,
+  };
 }
 
 function isMenuActionMethod(value: unknown): value is RelayMenuAction['method'] {
@@ -726,6 +789,8 @@ const serverSchema = {
               args: { type: 'object' },
               url: { type: 'string' },
               method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+              view: { type: 'object' },
+              input: { type: 'object' },
             },
             required: ['id', 'label'],
           },

@@ -72,6 +72,32 @@ The tool should return text JSON:
 
 Tool actions name upstream tools. The relay calls them against the selected upstream server and merges configured action `args` with request `args`.
 
+## Action Inputs
+
+Actions may include an `input` payload. The status bar app opens a small native input dialog and sends entered values as `args` to `POST /servers/:id/menu/actions/:actionId`.
+
+```json
+{
+  "id": "ingest_plan_url",
+  "label": "Ingest Plan URL",
+  "systemImage": "link.badge.plus",
+  "tool": "corpus_codex_ingest_plan_url",
+  "input": {
+    "title": "Ingest Plan URL",
+    "submitLabel": "Queue",
+    "fields": [
+      { "id": "url", "label": "Policy URL", "type": "string", "placeholder": "https://...", "required": true },
+      { "id": "carrier", "label": "Carrier", "type": "string" },
+      { "id": "planName", "label": "Plan Name", "type": "string" },
+      { "id": "state", "label": "State", "type": "string" },
+      { "id": "notes", "label": "Notes", "type": "string" }
+    ]
+  }
+}
+```
+
+Field types are `string`, `number`, and `boolean`. Required empty fields cancel the submission.
+
 ## Compact Views
 
 Menu actions may include a small `view` payload for at-a-glance data. The status bar app renders this inline as a compact submenu instead of executing a tool call. Keep payloads capped; do not stream full logs or ledgers through the menu model.

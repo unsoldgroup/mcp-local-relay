@@ -54,7 +54,27 @@ test('discovers menu status and executes upstream menu action', async (t) => {
       summary: 'Ready',
       state: 'ready',
       detail: ['Last sync 4m ago'],
-      actions: [{ id: 'sync_now', label: 'Sync Now', tool: 'sync_now' }],
+      actions: [
+        {
+          id: 'sync_now',
+          label: 'Sync Now',
+          tool: 'sync_now',
+          input: {
+            title: 'Sync',
+            fields: [{ id: 'force', label: 'Force', type: 'boolean' }],
+          },
+        },
+        {
+          id: 'ledger',
+          label: 'Ledger',
+          view: {
+            type: 'table',
+            title: 'Ledger',
+            columns: [{ id: 'status', label: '', kind: 'status' }],
+            rows: [{ status: 'success', plan: 'Plan A' }],
+          },
+        },
+      ],
     },
   }).catch((err: unknown) => {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'EPERM') {
@@ -77,6 +97,9 @@ test('discovers menu status and executes upstream menu action', async (t) => {
     assert.equal(menu.title, 'Mail Index');
     assert.equal(menu.summary, 'Ready');
     assert.equal(menu.actions[0].id, 'sync_now');
+    assert.equal(menu.actions[0].input?.fields[0].id, 'force');
+    assert.equal(menu.actions[1].view?.type, 'table');
+    assert.equal(menu.actions[1].view?.rows?.[0]?.status, 'success');
 
     const result = await manager.callMenuAction('mail', 'sync_now', { args: { force: true } });
     assert.deepEqual(result, {

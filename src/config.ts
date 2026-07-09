@@ -98,6 +98,12 @@ function normalizeMenuAction(input: RelayMenuAction): RelayMenuAction {
   if (input.args && typeof input.args === 'object' && !Array.isArray(input.args)) {
     action.args = input.args;
   }
+  if (input.view && typeof input.view === 'object' && !Array.isArray(input.view)) {
+    action.view = input.view;
+  }
+  if (input.input && typeof input.input === 'object' && !Array.isArray(input.input)) {
+    action.input = input.input;
+  }
   if (input.url) {
     if (input.method) assertLocalHttpUrl(input.url, `menu action ${input.id} url`);
     else assertLocalDisplayUrl(input.url, `menu action ${input.id} url`);
@@ -110,8 +116,8 @@ function normalizeMenuAction(input: RelayMenuAction): RelayMenuAction {
   if (action.tool && action.url) {
     throw new Error(`menu action ${input.id} must use only one of tool or url`);
   }
-  if (!action.tool && !action.url) {
-    throw new Error(`menu action ${input.id} requires tool or url`);
+  if (!action.tool && !action.url && !action.view) {
+    throw new Error(`menu action ${input.id} requires tool, url, or view`);
   }
   return action;
 }

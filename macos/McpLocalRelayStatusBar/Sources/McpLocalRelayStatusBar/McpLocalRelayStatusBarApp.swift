@@ -137,11 +137,11 @@ final class RelayStatusModel: ObservableObject {
         await refresh()
     }
 
-    func runMenuAction(serverId: String, actionId: String, confirm: Bool) async {
+    func runMenuAction(serverId: String, actionId: String, confirm: Bool, args: [String: Any] = [:]) async {
         var request = URLRequest(url: baseURL.appending(path: "servers/\(serverId)/menu/actions/\(actionId)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["confirm": confirm])
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["confirm": confirm, "args": args])
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             try check(response)
@@ -358,11 +358,22 @@ struct ServerMenu: View {
                                 if let url = action.url, let parsed = URL(string: url) {
                                     NSWorkspace.shared.open(parsed)
                                 } else {
+                                    let args: [String: Any]
+                                    if let input = action.input {
+                                        guard let prompted = promptForActionInput(input) else { return }
+                                        args = prompted
+                                    } else {
+                                        args = [:]
+                                    }
+                                    if action.confirm && !confirmMenuAction(action) {
+                                        return
+                                    }
                                     Task {
                                         await model.runMenuAction(
                                             serverId: server.id,
                                             actionId: action.id,
-                                            confirm: action.confirm
+                                            confirm: action.confirm,
+                                            args: args
                                         )
                                     }
                                 }
@@ -394,6 +405,66 @@ struct ServerMenu: View {
             Label(menu?.compactTitle ?? server.compactTitle, systemImage: menu?.systemImage ?? server.statusIcon)
         }
     }
+}
+
+func confirmMenuAction(_ action: RelayMenuAction) -> Bool {
+    let alert = NSAlert()
+    alert.messageText = action.label
+    alert.informativeText = "Run this action?"
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: "Run")
+    alert.addButton(withTitle: "Cancel")
+    return alert.runModal() == .alertFirstButtonReturn
+}
+
+func promptForActionInput(_ input: RelayActionInput) -> [String: Any]? {
+    let alert = NSAlert()
+    alert.messageText = input.title
+    alert.addButton(withTitle: input.submitLabel)
+    alert.addButton(withTitle: "Cancel")
+
+    let stack = NSStackView()
+    stack.orientation = .vertical
+    stack.spacing = 8
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    var fields: [(RelayActionInputField, NSTextField)] = []
+
+    for field in input.fields {
+        let label = NSTextField(labelWithString: field.label + (field.required ? " *" : ""))
+        let textField = NSTextField(string: field.defaultValue)
+        textField.placeholderString = field.placeholder
+        textField.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        stack.addArrangedSubview(label)
+        stack.addArrangedSubview(textField)
+        fields.append((field, textField))
+    }
+
+    alert.accessoryView = stack
+    guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+
+    var args: [String: Any] = [:]
+    for (field, textField) in fields {
+        let value = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if field.required && value.isEmpty {
+            return nil
+        }
+        if value.isEmpty { continue }
+        switch field.type {
+        case "number":
+            if let int = Int(value) {
+                args[field.id] = int
+            } else if let double = Double(value) {
+                args[field.id] = double
+            } else {
+                args[field.id] = value
+            }
+        case "boolean":
+            args[field.id] = ["1", "true", "yes", "y"].contains(value.lowercased())
+        default:
+            args[field.id] = value
+        }
+    }
+    return args
 }
 
 struct CompactRelayView: View {
@@ -514,9 +585,10 @@ struct RelayMenuAction: Decodable, Identifiable {
     let tool: String?
     let url: String?
     let view: RelayActionView?
+    let input: RelayActionInput?
 
     private enum CodingKeys: String, CodingKey {
-        case id, label, systemImage, confirm, tool, url, view
+        case id, label, systemImage, confirm, tool, url, view, input
     }
 
     init(from decoder: Decoder) throws {
@@ -528,6 +600,77 @@ struct RelayMenuAction: Decodable, Identifiable {
         tool = try c.decodeIfPresent(String.self, forKey: .tool)
         url = try c.decodeIfPresent(String.self, forKey: .url)
         view = try c.decodeIfPresent(RelayActionView.self, forKey: .view)
+        input = try c.decodeIfPresent(RelayActionInput.self, forKey: .input)
+    }
+}
+
+struct RelayActionInput: Decodable {
+    let title: String
+    let submitLabel: String
+    let fields: [RelayActionInputField]
+
+    private enum CodingKeys: String, CodingKey {
+        case title, submitLabel, fields
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "Action Input"
+        submitLabel = try c.decodeIfPresent(String.self, forKey: .submitLabel) ?? "Run"
+        fields = try c.decodeIfPresent([RelayActionInputField].self, forKey: .fields) ?? []
+    }
+}
+
+struct RelayActionInputField: Decodable {
+    let id: String
+    let label: String
+    let type: String
+    let placeholder: String?
+    let defaultRaw: RelayInputValue?
+    let required: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, label, type, placeholder, defaultRaw = "default", required
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        label = try c.decode(String.self, forKey: .label)
+        type = try c.decodeIfPresent(String.self, forKey: .type) ?? "string"
+        placeholder = try c.decodeIfPresent(String.self, forKey: .placeholder)
+        defaultRaw = try c.decodeIfPresent(RelayInputValue.self, forKey: .defaultRaw)
+        required = try c.decodeIfPresent(Bool.self, forKey: .required) ?? false
+    }
+
+    var defaultValue: String {
+        defaultRaw?.stringValue ?? ""
+    }
+}
+
+enum RelayInputValue: Decodable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let value = try? c.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? c.decode(Double.self) {
+            self = .number(value)
+        } else {
+            self = .bool(try c.decode(Bool.self))
+        }
+    }
+
+    var stringValue: String {
+        switch self {
+        case .string(let value): return value
+        case .number(let value):
+            return value.rounded() == value ? String(Int(value)) : String(value)
+        case .bool(let value): return value ? "true" : "false"
+        }
     }
 }
 
