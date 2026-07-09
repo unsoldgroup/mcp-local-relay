@@ -140,7 +140,7 @@ final class RelayStatusModel: ObservableObject {
         await refresh()
     }
 
-    func runMenuAction(serverId: String, actionId: String, confirm: Bool, args: [String: Any] = [:]) async -> String? {
+    func runMenuAction(serverId: String, actionId: String, confirm: Bool, args: [String: Any] = [:]) async -> MenuActionResult? {
         var request = URLRequest(url: baseURL.appending(path: "servers/\(serverId)/menu/actions/\(actionId)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -150,11 +150,11 @@ final class RelayStatusModel: ObservableObject {
             try check(response)
             errorMessage = ""
             await refresh()
-            return prettyResponse(data)
+            return menuActionResult(from: data)
         } catch {
             errorMessage = error.localizedDescription
             await refresh()
-            return error.localizedDescription
+            return MenuActionResult(summary: "Action failed", rows: [ActionResultRow(label: "Error", value: error.localizedDescription)], raw: nil)
         }
     }
 
@@ -375,14 +375,14 @@ struct ServerMenu: View {
                                 return
                             }
                             Task {
-                                if let output = await model.runMenuAction(
+                                if let result = await model.runMenuAction(
                                     serverId: server.id,
                                     actionId: action.id,
                                     confirm: action.confirm,
                                     args: args
-                                ), !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                ) {
                                     await MainActor.run {
-                                        showTextWindow(title: action.label, text: output)
+                                        showActionResultWindow(title: action.label, result: result)
                                     }
                                 }
                             }
@@ -438,9 +438,9 @@ func showRelayViewWindow(title: String, view: RelayActionView) {
     NSApp.activate(ignoringOtherApps: true)
 }
 
-func showTextWindow(title: String, text: String) {
+func showActionResultWindow(title: String, result: MenuActionResult) {
     let panel = floatingPanel(title: title, width: 620, height: 430)
-    panel.contentView = NSHostingView(rootView: ActionResultWindow(title: title, text: text))
+    panel.contentView = NSHostingView(rootView: ActionResultWindow(title: title, result: result))
     retainActionPanel(panel)
     panel.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
@@ -473,14 +473,90 @@ func floatingPanel(title: String, width: CGFloat, height: CGFloat) -> NSPanel {
     return panel
 }
 
-func prettyResponse(_ data: Data) -> String {
-    guard !data.isEmpty else { return "" }
-    if let json = try? JSONSerialization.jsonObject(with: data),
-       let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
-       let output = String(data: pretty, encoding: .utf8) {
-        return output
+func menuActionResult(from data: Data) -> MenuActionResult? {
+    guard !data.isEmpty else { return nil }
+    let object = (try? JSONSerialization.jsonObject(with: data)) ?? String(data: data, encoding: .utf8) ?? ""
+    let unwrapped = unwrapMcpText(object) ?? object
+    let parsed = parseJsonString(unwrapped) ?? unwrapped
+    return renderableActionResult(parsed)
+}
+
+func unwrapMcpText(_ object: Any) -> Any? {
+    guard let dict = object as? [String: Any],
+          let content = dict["content"] as? [[String: Any]],
+          let text = content.first?["text"] as? String else {
+        return nil
     }
-    return String(data: data, encoding: .utf8) ?? ""
+    return text
+}
+
+func parseJsonString(_ object: Any) -> Any? {
+    guard let text = object as? String,
+          let data = text.data(using: .utf8) else {
+        return nil
+    }
+    return try? JSONSerialization.jsonObject(with: data)
+}
+
+func renderableActionResult(_ object: Any) -> MenuActionResult? {
+    if let dict = object as? [String: Any] {
+        let status = dict["status"] as? [String: Any]
+        let state = stringValue(status?["state"] ?? dict["state"])
+        let started = boolDisplay(dict["started"])
+        let summary: String
+        if started == "true" && !state.isEmpty {
+            summary = state == "paused" ? "Started, currently paused" : "Started, \(state)"
+        } else if started == "true" {
+            summary = "Started"
+        } else if !state.isEmpty {
+            summary = state.capitalized
+        } else {
+            summary = "Action completed"
+        }
+
+        let rows = actionRows(from: dict, status: status)
+        return rows.isEmpty ? nil : MenuActionResult(summary: summary, rows: rows, raw: nil)
+    }
+    if let text = object as? String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : MenuActionResult(summary: "Action completed", rows: [ActionResultRow(label: "Result", value: trimmed)], raw: nil)
+    }
+    return nil
+}
+
+func actionRows(from dict: [String: Any], status: [String: Any]?) -> [ActionResultRow] {
+    let keys: [(String, Any?)] = [
+        ("Started", dict["started"]),
+        ("State", status?["state"] ?? dict["state"]),
+        ("PID", dict["pid"] ?? status?["pid"]),
+        ("PID alive", status?["pidAlive"]),
+        ("Workers", status?["workers"] ?? dict["workers"]),
+        ("Active", status?["active"]),
+        ("Dispatched", status?["dispatched"]),
+        ("Done", status?["done"]),
+        ("Failed", status?["failed"]),
+        ("Needs human", status?["needsHuman"]),
+        ("Pending", status?["pending"]),
+        ("Paused by", status?["pausedBy"]),
+        ("Last heartbeat", status?["lastHeartbeatAt"]),
+    ]
+    return keys.compactMap { label, value in
+        let text = stringValue(value)
+        return text.isEmpty || text == "null" ? nil : ActionResultRow(label: label, value: text)
+    }
+}
+
+func stringValue(_ value: Any?) -> String {
+    guard let value else { return "" }
+    if value is NSNull { return "" }
+    if let value = value as? String { return value }
+    if let value = value as? Bool { return value ? "true" : "false" }
+    if let value = value as? NSNumber { return value.stringValue }
+    return String(describing: value)
+}
+
+func boolDisplay(_ value: Any?) -> String {
+    stringValue(value).lowercased()
 }
 
 final class ActionInputPanelController {
@@ -722,25 +798,49 @@ struct RelayActionRow: View {
 
 struct ActionResultWindow: View {
     let title: String
-    let text: String
+    let result: MenuActionResult
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                Text(result.summary)
+                    .foregroundStyle(.secondary)
+            }
             ScrollView {
-                Text(text)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(result.rows) { row in
+                        HStack(alignment: .top) {
+                            Text(row.label)
+                                .foregroundStyle(.secondary)
+                                .frame(width: 120, alignment: .leading)
+                            Text(row.value)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                }
             }
         }
         .padding(16)
         .frame(minWidth: 520, minHeight: 320)
     }
+}
+
+struct MenuActionResult {
+    let summary: String
+    let rows: [ActionResultRow]
+    let raw: String?
+}
+
+struct ActionResultRow: Identifiable {
+    let id = UUID()
+    let label: String
+    let value: String
 }
 
 func boolValue(_ value: String) -> Bool {
