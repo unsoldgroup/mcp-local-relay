@@ -60,8 +60,7 @@ cat > "$PLIST_PATH" <<PLIST
   <string>com.unsoldgroup.mcp-local-relay-status-bar</string>
   <key>ProgramArguments</key>
   <array>
-    <string>open</string>
-    <string>-a</string>
+    <string>/usr/bin/open</string>
     <string>$APP_DIR</string>
   </array>
   <key>RunAtLoad</key>
@@ -72,7 +71,7 @@ PLIST
 
 launchctl bootout "gui/$(id -u)" "$PLIST_PATH" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
-open -a "$APP_DIR"
+/usr/bin/open "$APP_DIR"
 
 printf 'Installed %s\n' "$APP_DIR"
 printf 'Registered %s\n' "$PLIST_PATH"
