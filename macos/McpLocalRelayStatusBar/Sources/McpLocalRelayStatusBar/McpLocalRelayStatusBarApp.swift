@@ -704,6 +704,15 @@ struct RelayActionRow: View {
                 }
             }
             Spacer(minLength: 8)
+            if let link = row.linkUrl {
+                Button {
+                    NSWorkspace.shared.open(link)
+                } label: {
+                    Label(row.linkLabel, systemImage: "arrow.up.forward.app")
+                        .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.borderless)
+            }
         }
         .padding(8)
         .background(Color.secondary.opacity(0.08))
@@ -1022,6 +1031,16 @@ struct RelayViewRow: Decodable {
         }
     }
 
+    var linkUrl: URL? {
+        guard let raw = values["linkUrl"] ?? values["url"], !raw.isEmpty else { return nil }
+        return URL(string: raw)
+    }
+
+    var linkLabel: String {
+        let label = values["linkLabel"] ?? "Open"
+        return label.isEmpty ? "Open" : label
+    }
+
     func primary(columns: [RelayViewColumn]) -> String {
         let visibleColumns = columns.filter { $0.kind != "status" }
         let preferred = ["plan", "item", "documentId", "slug", "title", "name"]
@@ -1041,6 +1060,7 @@ struct RelayViewRow: Decodable {
         return ordered
             .compactMap { values[$0] }
             .filter { !$0.isEmpty && $0 != primaryValue }
+            .filter { $0 != values["linkLabel"] && $0 != values["linkUrl"] && $0 != values["url"] }
             .joined(separator: " · ")
     }
 
@@ -1050,6 +1070,7 @@ struct RelayViewRow: Decodable {
         return ordered
             .compactMap { values[$0] }
             .filter { !$0.isEmpty }
+            .filter { $0 != values["linkLabel"] && $0 != values["linkUrl"] && $0 != values["url"] }
             .joined(separator: " · ")
     }
 }
