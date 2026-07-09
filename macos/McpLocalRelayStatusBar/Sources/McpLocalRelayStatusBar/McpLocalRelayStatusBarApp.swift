@@ -1,6 +1,8 @@
 import AppKit
 import SwiftUI
 
+private var retainedActionPanels: [NSPanel] = []
+
 @main
 struct McpLocalRelayStatusBarApp: App {
     @StateObject private var model = RelayStatusModel()
@@ -428,6 +430,7 @@ func promptForActionInputWindow(_ input: RelayActionInput) -> [String: Any]? {
 func showRelayViewWindow(title: String, view: RelayActionView) {
     let panel = floatingPanel(title: title, width: 620, height: 430)
     panel.contentView = NSHostingView(rootView: RelayActionViewWindow(view: view))
+    retainActionPanel(panel)
     panel.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
 }
@@ -435,8 +438,13 @@ func showRelayViewWindow(title: String, view: RelayActionView) {
 func showTextWindow(title: String, text: String) {
     let panel = floatingPanel(title: title, width: 620, height: 430)
     panel.contentView = NSHostingView(rootView: ActionResultWindow(title: title, text: text))
+    retainActionPanel(panel)
     panel.makeKeyAndOrderFront(nil)
     NSApp.activate(ignoringOtherApps: true)
+}
+
+func retainActionPanel(_ panel: NSPanel) {
+    retainedActionPanels.append(panel)
 }
 
 func floatingPanel(title: String, width: CGFloat, height: CGFloat) -> NSPanel {
