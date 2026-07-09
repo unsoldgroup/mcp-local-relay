@@ -74,7 +74,7 @@ Tool actions name upstream tools. The relay calls them against the selected upst
 
 ## Action Inputs
 
-Actions may include an `input` payload. The status bar app opens a small native input dialog and sends entered values as `args` to `POST /servers/:id/menu/actions/:actionId`.
+Actions may include an `input` payload. The status bar app opens a native form panel and sends entered values as `args` to `POST /servers/:id/menu/actions/:actionId`.
 
 ```json
 {
@@ -87,20 +87,24 @@ Actions may include an `input` payload. The status bar app opens a small native 
     "submitLabel": "Queue",
     "fields": [
       { "id": "url", "label": "Policy URL", "type": "string", "placeholder": "https://...", "required": true },
-      { "id": "carrier", "label": "Carrier", "type": "string" },
-      { "id": "planName", "label": "Plan Name", "type": "string" },
+      { "id": "operatorName", "label": "Operator Name", "type": "string", "required": true },
+      { "id": "carrierSlug", "label": "Carrier Slug", "type": "string" },
+      { "id": "planName", "label": "Plan / Family Name", "type": "string" },
       { "id": "state", "label": "State", "type": "string" },
-      { "id": "notes", "label": "Notes", "type": "string" }
+      { "id": "country", "label": "Country", "type": "string" },
+      { "id": "region", "label": "Region", "type": "string" },
+      { "id": "documentDate", "label": "Document Date", "type": "string" },
+      { "id": "notes", "label": "Notes", "type": "string", "multiline": true }
     ]
   }
 }
 ```
 
-Field types are `string`, `number`, and `boolean`. Required empty fields cancel the submission.
+Field types are `string`, `number`, and `boolean`. Required empty fields block the submission in the form. String fields may set `multiline: true`.
 
 ## Compact Views
 
-Menu actions may include a small `view` payload for at-a-glance data. The status bar app renders this inline as a compact submenu instead of executing a tool call. Keep payloads capped; do not stream full logs or ledgers through the menu model.
+Menu actions may include a small `view` payload for at-a-glance data. The status bar app opens a compact viewer window instead of executing a tool call or handing the payload to macOS file association. Keep payloads capped; do not stream full logs or ledgers through the menu model.
 
 ```json
 {

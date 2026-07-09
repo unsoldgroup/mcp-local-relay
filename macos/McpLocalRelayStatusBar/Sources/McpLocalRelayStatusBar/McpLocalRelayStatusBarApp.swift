@@ -137,19 +137,22 @@ final class RelayStatusModel: ObservableObject {
         await refresh()
     }
 
-    func runMenuAction(serverId: String, actionId: String, confirm: Bool, args: [String: Any] = [:]) async {
+    func runMenuAction(serverId: String, actionId: String, confirm: Bool, args: [String: Any] = [:]) async -> String? {
         var request = URLRequest(url: baseURL.appending(path: "servers/\(serverId)/menu/actions/\(actionId)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["confirm": confirm, "args": args])
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             try check(response)
             errorMessage = ""
+            await refresh()
+            return prettyResponse(data)
         } catch {
             errorMessage = error.localizedDescription
+            await refresh()
+            return error.localizedDescription
         }
-        await refresh()
     }
 
     func restartRelay() async {
@@ -347,39 +350,39 @@ struct ServerMenu: View {
                     Text("No quick actions")
                 } else {
                     ForEach(menu.actions) { action in
-                        if let view = action.view {
-                            Menu {
-                                CompactRelayView(view: view)
-                            } label: {
-                                Label(action.label, systemImage: action.systemImage ?? "tablecells")
+                        Button {
+                            if let view = action.view {
+                                showRelayViewWindow(title: action.label, view: view)
+                                return
                             }
-                        } else {
-                            Button {
-                                if let url = action.url, let parsed = URL(string: url) {
-                                    NSWorkspace.shared.open(parsed)
-                                } else {
-                                    let args: [String: Any]
-                                    if let input = action.input {
-                                        guard let prompted = promptForActionInput(input) else { return }
-                                        args = prompted
-                                    } else {
-                                        args = [:]
-                                    }
-                                    if action.confirm && !confirmMenuAction(action) {
-                                        return
-                                    }
-                                    Task {
-                                        await model.runMenuAction(
-                                            serverId: server.id,
-                                            actionId: action.id,
-                                            confirm: action.confirm,
-                                            args: args
-                                        )
+                            if let url = action.url, action.tool == nil, action.input == nil, let parsed = URL(string: url) {
+                                NSWorkspace.shared.open(parsed)
+                                return
+                            }
+                            let args: [String: Any]
+                            if let input = action.input {
+                                guard let prompted = promptForActionInputWindow(input) else { return }
+                                args = prompted
+                            } else {
+                                args = [:]
+                            }
+                            if action.confirm && !confirmMenuAction(action) {
+                                return
+                            }
+                            Task {
+                                if let output = await model.runMenuAction(
+                                    serverId: server.id,
+                                    actionId: action.id,
+                                    confirm: action.confirm,
+                                    args: args
+                                ), !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    await MainActor.run {
+                                        showTextWindow(title: action.label, text: output)
                                     }
                                 }
-                            } label: {
-                                Label(action.label, systemImage: action.systemImage ?? "bolt")
                             }
+                        } label: {
+                            Label(action.label, systemImage: action.systemImage ?? (action.view == nil ? "bolt" : "tablecells"))
                         }
                     }
                 }
@@ -417,54 +420,302 @@ func confirmMenuAction(_ action: RelayMenuAction) -> Bool {
     return alert.runModal() == .alertFirstButtonReturn
 }
 
-func promptForActionInput(_ input: RelayActionInput) -> [String: Any]? {
-    let alert = NSAlert()
-    alert.messageText = input.title
-    alert.addButton(withTitle: input.submitLabel)
-    alert.addButton(withTitle: "Cancel")
+func promptForActionInputWindow(_ input: RelayActionInput) -> [String: Any]? {
+    let controller = ActionInputPanelController(input: input)
+    return controller.run()
+}
 
-    let stack = NSStackView()
-    stack.orientation = .vertical
-    stack.spacing = 8
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    var fields: [(RelayActionInputField, NSTextField)] = []
+func showRelayViewWindow(title: String, view: RelayActionView) {
+    let panel = floatingPanel(title: title, width: 620, height: 430)
+    panel.contentView = NSHostingView(rootView: RelayActionViewWindow(view: view))
+    panel.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+}
 
-    for field in input.fields {
-        let label = NSTextField(labelWithString: field.label + (field.required ? " *" : ""))
-        let textField = NSTextField(string: field.defaultValue)
-        textField.placeholderString = field.placeholder
-        textField.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
-        stack.addArrangedSubview(label)
-        stack.addArrangedSubview(textField)
-        fields.append((field, textField))
+func showTextWindow(title: String, text: String) {
+    let panel = floatingPanel(title: title, width: 620, height: 430)
+    panel.contentView = NSHostingView(rootView: ActionResultWindow(title: title, text: text))
+    panel.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+}
+
+func floatingPanel(title: String, width: CGFloat, height: CGFloat) -> NSPanel {
+    let panel = NSPanel(
+        contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+        styleMask: [.titled, .closable, .resizable, .utilityWindow],
+        backing: .buffered,
+        defer: false
+    )
+    panel.title = title
+    panel.isFloatingPanel = true
+    panel.hidesOnDeactivate = false
+    panel.center()
+    return panel
+}
+
+func prettyResponse(_ data: Data) -> String {
+    guard !data.isEmpty else { return "" }
+    if let json = try? JSONSerialization.jsonObject(with: data),
+       let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+       let output = String(data: pretty, encoding: .utf8) {
+        return output
+    }
+    return String(data: data, encoding: .utf8) ?? ""
+}
+
+final class ActionInputPanelController {
+    private let input: RelayActionInput
+    private var result: [String: Any]?
+    private var panel: NSPanel?
+
+    init(input: RelayActionInput) {
+        self.input = input
     }
 
-    alert.accessoryView = stack
-    guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+    func run() -> [String: Any]? {
+        let height = CGFloat(min(620, max(300, 132 + input.fields.count * 72)))
+        let panel = floatingPanel(title: input.title, width: 520, height: height)
+        self.panel = panel
+        panel.contentView = NSHostingView(rootView: ActionInputForm(
+            input: input,
+            onCancel: { [weak self] in self?.finish(nil) },
+            onSubmit: { [weak self] args in self?.finish(args) }
+        ))
+        panel.makeKeyAndOrderFront(nil as Any?)
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.runModal(for: panel)
+        return result
+    }
 
-    var args: [String: Any] = [:]
-    for (field, textField) in fields {
-        let value = textField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if field.required && value.isEmpty {
-            return nil
+    private func finish(_ value: [String: Any]?) {
+        result = value
+        if let panel {
+            NSApp.stopModal()
+            panel.close()
         }
-        if value.isEmpty { continue }
-        switch field.type {
-        case "number":
-            if let int = Int(value) {
-                args[field.id] = int
-            } else if let double = Double(value) {
-                args[field.id] = double
-            } else {
-                args[field.id] = value
+    }
+}
+
+struct ActionInputForm: View {
+    let input: RelayActionInput
+    let onCancel: () -> Void
+    let onSubmit: ([String: Any]) -> Void
+
+    @State private var values: [String: String]
+    @State private var validationMessage = ""
+
+    init(input: RelayActionInput, onCancel: @escaping () -> Void, onSubmit: @escaping ([String: Any]) -> Void) {
+        self.input = input
+        self.onCancel = onCancel
+        self.onSubmit = onSubmit
+        _values = State(initialValue: Dictionary(uniqueKeysWithValues: input.fields.map { ($0.id, $0.defaultValue) }))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(input.title)
+                .font(.headline)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(input.fields) { field in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 3) {
+                                Text(field.label)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                if field.required {
+                                    Text("*")
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                            if field.type == "boolean" {
+                                Toggle("Enabled", isOn: Binding(
+                                    get: { boolValue(values[field.id] ?? field.defaultValue) },
+                                    set: { values[field.id] = $0 ? "true" : "false" }
+                                ))
+                            } else if field.multiline {
+                                TextEditor(text: binding(for: field))
+                                    .font(.body)
+                                    .frame(minHeight: 84)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
+                            } else {
+                                TextField(field.placeholder ?? "", text: binding(for: field))
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
             }
-        case "boolean":
-            args[field.id] = ["1", "true", "yes", "y"].contains(value.lowercased())
-        default:
-            args[field.id] = value
+
+            if !validationMessage.isEmpty {
+                Label(validationMessage, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+                    .font(.caption)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button(input.submitLabel) {
+                    submit()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
         }
+        .padding(18)
+        .frame(minWidth: 460, minHeight: 260)
     }
-    return args
+
+    private func binding(for field: RelayActionInputField) -> Binding<String> {
+        Binding(
+            get: { values[field.id] ?? field.defaultValue },
+            set: { values[field.id] = $0 }
+        )
+    }
+
+    private func submit() {
+        var args: [String: Any] = [:]
+        for field in input.fields {
+            let rawValue = (values[field.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if field.required && rawValue.isEmpty {
+                validationMessage = "\(field.label) is required."
+                return
+            }
+            guard !rawValue.isEmpty else { continue }
+            switch field.type {
+            case "number":
+                if let intValue = Int(rawValue) {
+                    args[field.id] = intValue
+                } else if let doubleValue = Double(rawValue) {
+                    args[field.id] = doubleValue
+                } else {
+                    validationMessage = "\(field.label) must be a number."
+                    return
+                }
+            case "boolean":
+                args[field.id] = boolValue(rawValue)
+            default:
+                args[field.id] = rawValue
+            }
+        }
+        onSubmit(args)
+    }
+}
+
+struct RelayActionViewWindow: View {
+    let view: RelayActionView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(view.title)
+                        .font(.headline)
+                    if !view.summary.isEmpty {
+                        Text(view.summary)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                if let refreshSeconds = view.refreshSeconds {
+                    Label("\(refreshSeconds)s", systemImage: "arrow.clockwise")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if view.rows.isEmpty {
+                        Text("No rows")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(view.rows.enumerated()), id: \.offset) { _, row in
+                            RelayActionRow(row: row, columns: view.columns)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            if !view.footerActions.isEmpty {
+                Divider()
+                HStack {
+                    Spacer()
+                    ForEach(view.footerActions) { action in
+                        Button {
+                            if let parsed = URL(string: action.url) {
+                                NSWorkspace.shared.open(parsed)
+                            }
+                        } label: {
+                            Label(action.label, systemImage: action.systemImage ?? "arrow.up.forward.app")
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 520, minHeight: 320)
+    }
+}
+
+struct RelayActionRow: View {
+    let row: RelayViewRow
+    let columns: [RelayViewColumn]
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: row.statusIcon)
+                .foregroundStyle(row.statusColor)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.primary(columns: columns))
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                let secondary = row.secondary(columns: columns)
+                if !secondary.isEmpty {
+                    Text(secondary)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+struct ActionResultWindow: View {
+    let title: String
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline)
+            ScrollView {
+                Text(text)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 520, minHeight: 320)
+    }
+}
+
+func boolValue(_ value: String) -> Bool {
+    ["1", "true", "yes", "y", "on"].contains(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
 }
 
 struct CompactRelayView: View {
@@ -621,16 +872,17 @@ struct RelayActionInput: Decodable {
     }
 }
 
-struct RelayActionInputField: Decodable {
+struct RelayActionInputField: Decodable, Identifiable {
     let id: String
     let label: String
     let type: String
     let placeholder: String?
     let defaultRaw: RelayInputValue?
     let required: Bool
+    let multiline: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case id, label, type, placeholder, defaultRaw = "default", required
+        case id, label, type, placeholder, defaultRaw = "default", required, multiline
     }
 
     init(from decoder: Decoder) throws {
@@ -641,6 +893,7 @@ struct RelayActionInputField: Decodable {
         placeholder = try c.decodeIfPresent(String.self, forKey: .placeholder)
         defaultRaw = try c.decodeIfPresent(RelayInputValue.self, forKey: .defaultRaw)
         required = try c.decodeIfPresent(Bool.self, forKey: .required) ?? false
+        multiline = try c.decodeIfPresent(Bool.self, forKey: .multiline) ?? false
     }
 
     var defaultValue: String {
@@ -736,6 +989,39 @@ struct RelayViewRow: Decodable {
         case "paused": return "pause.circle.fill"
         default: return "circle.fill"
         }
+    }
+
+    var statusColor: Color {
+        switch values["status"]?.lowercased() {
+        case "success": return .green
+        case "running": return .blue
+        case "warning": return .yellow
+        case "error": return .red
+        case "paused": return .orange
+        default: return .secondary
+        }
+    }
+
+    func primary(columns: [RelayViewColumn]) -> String {
+        let visibleColumns = columns.filter { $0.kind != "status" }
+        let preferred = ["plan", "item", "documentId", "slug", "title", "name"]
+        if let key = preferred.first(where: { !(values[$0] ?? "").isEmpty }) {
+            return values[key] ?? ""
+        }
+        if let first = visibleColumns.first(where: { !(values[$0.id] ?? "").isEmpty }) {
+            return values[first.id] ?? ""
+        }
+        return display(columns: columns)
+    }
+
+    func secondary(columns: [RelayViewColumn]) -> String {
+        let primaryValue = primary(columns: columns)
+        let visibleColumns = columns.filter { $0.kind != "status" }
+        let ordered = visibleColumns.isEmpty ? values.keys.sorted() : visibleColumns.map(\.id)
+        return ordered
+            .compactMap { values[$0] }
+            .filter { !$0.isEmpty && $0 != primaryValue }
+            .joined(separator: " · ")
     }
 
     func display(columns: [RelayViewColumn]) -> String {

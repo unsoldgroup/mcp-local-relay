@@ -651,6 +651,7 @@ function normalizeActionInput(input: unknown): RelayMenuAction['input'] {
         ? field.default
         : undefined,
       required: field.required === true,
+      multiline: field.multiline === true,
     }];
   });
   if (fields.length === 0) return undefined;

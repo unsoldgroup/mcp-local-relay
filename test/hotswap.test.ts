@@ -61,7 +61,10 @@ test('discovers menu status and executes upstream menu action', async (t) => {
           tool: 'sync_now',
           input: {
             title: 'Sync',
-            fields: [{ id: 'force', label: 'Force', type: 'boolean' }],
+            fields: [
+              { id: 'force', label: 'Force', type: 'boolean' },
+              { id: 'notes', label: 'Notes', type: 'string', multiline: true },
+            ],
           },
         },
         {
@@ -98,6 +101,7 @@ test('discovers menu status and executes upstream menu action', async (t) => {
     assert.equal(menu.summary, 'Ready');
     assert.equal(menu.actions[0].id, 'sync_now');
     assert.equal(menu.actions[0].input?.fields[0].id, 'force');
+    assert.equal(menu.actions[0].input?.fields[1].multiline, true);
     assert.equal(menu.actions[1].view?.type, 'table');
     assert.equal(menu.actions[1].view?.rows?.[0]?.status, 'success');
 

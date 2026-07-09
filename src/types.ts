@@ -51,6 +51,7 @@ export interface RelayActionInputField {
   placeholder?: string;
   default?: string | number | boolean;
   required?: boolean;
+  multiline?: boolean;
 }
 
 export interface RelayActionInput {
