@@ -8,6 +8,7 @@ import type {
   RelayMenuConfig,
   RelayMode,
   RelayServerConfig,
+  RelayUpdateConfig,
 } from './types.js';
 
 export const defaultAdmin = {
@@ -33,8 +34,30 @@ export function normalizeConfig(raw: unknown): RelayConfig {
       port: Number(input.admin?.port || defaultAdmin.port),
       mcpPath: input.admin?.mcpPath || defaultAdmin.mcpPath,
     },
+    updates: normalizeUpdates(input.updates),
     servers,
   };
+}
+
+function normalizeUpdates(input: unknown): RelayUpdateConfig {
+  if (input === undefined) {
+    return {
+      autoUpgrade: false,
+      checkIntervalMs: 24 * 60 * 60 * 1000,
+    };
+  }
+  if (!input || typeof input !== 'object') throw new Error('updates config must be an object');
+  const updates = input as RelayUpdateConfig;
+  return {
+    autoUpgrade: updates.autoUpgrade === true,
+    checkIntervalMs: normalizePositiveMs(updates.checkIntervalMs, 24 * 60 * 60 * 1000),
+    packageManager: normalizePackageManager(updates.packageManager),
+    registryUrl: typeof updates.registryUrl === 'string' && updates.registryUrl ? updates.registryUrl : undefined,
+  };
+}
+
+function normalizePackageManager(value: unknown) {
+  return value === 'pnpm' || value === 'npm' || value === 'yarn' || value === 'bun' ? value : undefined;
 }
 
 export function normalizeServer(input: RelayServerConfig): RelayServerConfig {
@@ -62,9 +85,21 @@ export function normalizeServer(input: RelayServerConfig): RelayServerConfig {
     envFile: input.envFile,
     cache: {
       toolsTtlMs: Number(input.cache?.toolsTtlMs || 15 * 60 * 1000),
+      autoRefreshMs: normalizeAutoRefreshMs(input.cache?.autoRefreshMs, input.cache?.toolsTtlMs),
     },
     menu: normalizeMenu(input.menu),
   };
+}
+
+function normalizeAutoRefreshMs(value: unknown, toolsTtlMs: unknown) {
+  if (value === false || value === 0) return 0;
+  const fallback = Number(toolsTtlMs || 15 * 60 * 1000);
+  return normalizePositiveMs(value, fallback);
+}
+
+function normalizePositiveMs(value: unknown, fallback: number) {
+  const parsed = Number(value || fallback);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function normalizeMenu(input: unknown): RelayMenuConfig | undefined {

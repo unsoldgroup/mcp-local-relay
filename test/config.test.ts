@@ -15,8 +15,46 @@ test('normalizes minimal config', () => {
   });
   assert.equal(config.admin?.host, '127.0.0.1');
   assert.equal(config.admin?.port, 3764);
+  assert.equal(config.updates?.autoUpgrade, false);
+  assert.equal(config.updates?.checkIntervalMs, 86_400_000);
   assert.equal(config.servers[0].enabled, true);
   assert.equal(config.servers[0].mode, 'posthog-cli');
+});
+
+test('normalizes app update config', () => {
+  const config = normalizeConfig({
+    updates: {
+      autoUpgrade: true,
+      checkIntervalMs: 60_000,
+      packageManager: 'pnpm',
+      registryUrl: 'https://registry.npmjs.org',
+    },
+    servers: [],
+  });
+  assert.equal(config.updates?.autoUpgrade, true);
+  assert.equal(config.updates?.checkIntervalMs, 60_000);
+  assert.equal(config.updates?.packageManager, 'pnpm');
+  assert.equal(config.updates?.registryUrl, 'https://registry.npmjs.org');
+});
+
+test('normalizes automatic refresh interval', () => {
+  const config = normalizeConfig({
+    servers: [
+      {
+        id: 'docs',
+        remote: { type: 'streamable_http', url: 'https://example.com/mcp' },
+        cache: { toolsTtlMs: 60_000 },
+      },
+      {
+        id: 'manual',
+        remote: { type: 'streamable_http', url: 'https://example.com/mcp' },
+        cache: { autoRefreshMs: 0 },
+      },
+    ],
+  });
+  assert.equal(config.servers[0].cache?.toolsTtlMs, 60_000);
+  assert.equal(config.servers[0].cache?.autoRefreshMs, 60_000);
+  assert.equal(config.servers[1].cache?.autoRefreshMs, 0);
 });
 
 test('rejects invalid server id', () => {

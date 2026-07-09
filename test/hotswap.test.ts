@@ -42,10 +42,56 @@ test('hot-adds upstream server and calls localized tool', async (t) => {
       content: [{ type: 'text', text: 'hello' }],
     });
   } finally {
+    manager.stop();
     await upstream.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('automatically refreshes upstream tool cache on an interval', async (t) => {
+  const upstream = await startMockMcpServer().catch((err: unknown) => {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EPERM') {
+      t.skip('local listen is blocked by the current sandbox');
+      return undefined;
+    }
+    throw err;
+  });
+  if (!upstream) return;
+  const dir = await mkdtemp(join(tmpdir(), 'mcp-local-relay-'));
+  const manager = new RelayManager(
+    {
+      servers: [
+        {
+          id: 'auto-refresh',
+          remote: { type: 'streamable_http', url: upstream.url },
+          cache: { toolsTtlMs: 25, autoRefreshMs: 25 },
+        },
+      ],
+    },
+    join(dir, 'config.json'),
+  );
+
+  try {
+    await manager.start();
+    await waitUntil(() => upstream.listToolsCount() >= 2);
+    const status = manager.status();
+    assert.equal(status.servers[0].connected, true);
+    assert.equal(status.servers[0].autoRefreshMs, 25);
+    assert.ok(status.servers[0].nextAutoRefreshAt > Date.now());
+  } finally {
+    manager.stop();
+    await upstream.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+async function waitUntil(fn: () => boolean, timeoutMs = 1000) {
+  const started = Date.now();
+  while (!fn()) {
+    if (Date.now() - started > timeoutMs) throw new Error('timed out waiting for condition');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 test('discovers menu status and executes upstream menu action', async (t) => {
   const upstream = await startMockMcpServer({
@@ -110,6 +156,7 @@ test('discovers menu status and executes upstream menu action', async (t) => {
       content: [{ type: 'text', text: 'synced:true' }],
     });
   } finally {
+    manager.stop();
     await upstream.close();
     await rm(dir, { recursive: true, force: true });
   }
@@ -143,6 +190,7 @@ test('falls back when menu metadata is malformed and enforces confirmation', asy
     assert.equal(menu.actions[0].id, 'purge');
     await assert.rejects(() => manager.callMenuAction('ctx', 'purge', {}), /confirm/);
   } finally {
+    manager.stop();
     await upstream.close();
     await rm(dir, { recursive: true, force: true });
   }
@@ -193,6 +241,7 @@ test('serves menu status and menu actions over admin endpoints', async (t) => {
     const result = (await actionResponse.json()) as { content?: Array<{ text?: string }> };
     assert.equal(result.content?.[0].text, 'synced:true');
   } finally {
+    service.manager.stop();
     await new Promise<void>((resolve) => service.httpServer.close(() => resolve()));
     await upstream.close();
     await rm(dir, { recursive: true, force: true });
@@ -218,6 +267,7 @@ async function getFreePort() {
 async function startMockMcpServer(options: { menuStatus?: unknown; menuStatusText?: string } = {}) {
   const transports = new Map<string, StreamableHTTPServerTransport>();
   const servers = new Map<string, Server>();
+  let listToolsCount = 0;
   const httpServer = createServer((req, res) => {
     void (async () => {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
@@ -249,32 +299,35 @@ async function startMockMcpServer(options: { menuStatus?: unknown; menuStatusTex
         const server = new Server({ name: 'mock-upstream', version: '1.0.0' }, {
           capabilities: { tools: {} },
         });
-        server.setRequestHandler(ListToolsRequestSchema, async () => ({
-          tools: [
-            {
-              name: 'echo',
-              description: 'Echo a message',
-              inputSchema: {
-                type: 'object',
-                properties: { message: { type: 'string' } },
-                required: ['message'],
+        server.setRequestHandler(ListToolsRequestSchema, async () => {
+          listToolsCount += 1;
+          return {
+            tools: [
+              {
+                name: 'echo',
+                description: 'Echo a message',
+                inputSchema: {
+                  type: 'object',
+                  properties: { message: { type: 'string' } },
+                  required: ['message'],
+                },
               },
-            },
-            {
-              name: 'sync_now',
-              description: 'Sync now',
-              inputSchema: {
-                type: 'object',
-                properties: { force: { type: 'boolean' } },
+              {
+                name: 'sync_now',
+                description: 'Sync now',
+                inputSchema: {
+                  type: 'object',
+                  properties: { force: { type: 'boolean' } },
+                },
               },
-            },
-            {
-              name: 'relay_menu_status',
-              description: 'Menu status',
-              inputSchema: { type: 'object', properties: {} },
-            },
-          ],
-        }));
+              {
+                name: 'relay_menu_status',
+                description: 'Menu status',
+                inputSchema: { type: 'object', properties: {} },
+              },
+            ],
+          };
+        });
         server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (request.params.name === 'relay_menu_status') {
             return {
@@ -323,6 +376,7 @@ async function startMockMcpServer(options: { menuStatus?: unknown; menuStatusTex
   assert.ok(address && typeof address === 'object');
   return {
     url: `http://127.0.0.1:${address.port}/mcp`,
+    listToolsCount: () => listToolsCount,
     close: async () => {
       for (const transport of transports.values()) await transport.close();
       for (const server of servers.values()) await server.close();

@@ -12,6 +12,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { loadEnvFile } from './env-file.js';
 import { normalizeConfig, normalizeServer, toolsCachePath, writeConfig } from './config.js';
+import { RelayLogger, errorFields } from './logger.js';
 import type {
   RelayConfig,
   RelayActionInputField,
@@ -21,6 +22,7 @@ import type {
   RelayServerConfig,
   RelayServerStatus,
   RelayStatus,
+  RelayUpdateStatus,
 } from './types.js';
 
 interface ToolDefinition {
@@ -34,6 +36,8 @@ interface RelayState {
   config: RelayServerConfig;
   client?: Client;
   connecting?: Promise<Client>;
+  autoRefreshTimer?: ReturnType<typeof setTimeout>;
+  nextAutoRefreshAt: number;
   cachedTools: ToolDefinition[];
   cachedAt: number;
   lastRefreshAttemptAt: number;
@@ -52,11 +56,13 @@ export class RelayManager {
   constructor(
     config: RelayConfig,
     private readonly configPath: string,
+    private readonly logger = new RelayLogger(),
   ) {
     this.config = normalizeConfig(config);
     for (const server of this.config.servers) {
       this.states.set(server.id, {
         config: server,
+        nextAutoRefreshAt: 0,
         cachedTools: [],
         cachedAt: 0,
         lastRefreshAttemptAt: 0,
@@ -74,7 +80,19 @@ export class RelayManager {
   async start() {
     await Promise.all([...this.states.values()].map((state) => this.loadCache(state)));
     for (const state of this.states.values()) {
-      if (state.config.enabled) void this.ensureToolsFresh(state);
+      if (state.config.enabled) void this.autoRefreshState(state, true);
+    }
+    this.logger.info('relay_started', {
+      configPath: this.configPath,
+      servers: this.config.servers.length,
+      enabledServers: this.config.servers.filter((server) => server.enabled !== false).length,
+    });
+  }
+
+  stop() {
+    for (const state of this.states.values()) {
+      this.clearAutoRefresh(state);
+      this.resetClient(state);
     }
   }
 
@@ -94,7 +112,7 @@ export class RelayManager {
     return server;
   }
 
-  status(sessions = 0): RelayStatus {
+  status(sessions = 0, updates?: RelayUpdateStatus): RelayStatus {
     const servers = [...this.states.values()].map((state): RelayServerStatus => ({
       id: state.config.id,
       name: state.config.name || state.config.id,
@@ -106,6 +124,8 @@ export class RelayManager {
       connected: Boolean(state.client),
       cachedTools: state.cachedTools.length,
       cachedAt: state.cachedAt,
+      autoRefreshMs: state.config.cache?.autoRefreshMs || 0,
+      nextAutoRefreshAt: state.nextAutoRefreshAt,
       lastRefreshAttemptAt: state.lastRefreshAttemptAt,
       lastRefreshError: state.lastRefreshError,
     }));
@@ -115,6 +135,8 @@ export class RelayManager {
       uptimeMs: Date.now() - this.startedAt,
       sessions,
       servers,
+      updates,
+      events: this.logger.recent(50),
     };
   }
 
@@ -151,6 +173,11 @@ export class RelayManager {
         { timeout: 120000 },
       );
     } catch (err) {
+      this.logger.error('upstream_tool_call_failed', {
+        serverId: state.config.id,
+        toolName: parsed.toolName,
+        ...errorFields(err),
+      });
       this.resetClient(state);
       throw err;
     }
@@ -194,6 +221,7 @@ export class RelayManager {
     }
     const state: RelayState = {
       config: server,
+      nextAutoRefreshAt: 0,
       cachedTools: [],
       cachedAt: 0,
       lastRefreshAttemptAt: 0,
@@ -205,6 +233,7 @@ export class RelayManager {
     this.config.servers.push(server);
     await writeConfig(this.config, this.configPath);
     this.states.set(server.id, state);
+    this.scheduleAutoRefresh(state);
     await this.notifyListChanged();
     return { content: textJson({ ok: true, id: server.id, cachedTools: state.cachedTools.length }) };
   }
@@ -213,6 +242,7 @@ export class RelayManager {
     const server = normalizeServer(input as RelayServerConfig);
     const existing = this.requireState(server.id);
     this.resetClient(existing);
+    this.clearAutoRefresh(existing);
     existing.config = server;
     existing.cachedTools = [];
     existing.cachedAt = 0;
@@ -222,6 +252,7 @@ export class RelayManager {
     await this.refreshTools(existing);
     this.config.servers = this.config.servers.map((item) => (item.id === server.id ? server : item));
     await writeConfig(this.config, this.configPath);
+    this.scheduleAutoRefresh(existing);
     await this.notifyListChanged();
     return { content: textJson({ ok: true, id: server.id, cachedTools: existing.cachedTools.length }) };
   }
@@ -229,6 +260,7 @@ export class RelayManager {
   async removeServer(input: unknown) {
     const id = readId(input);
     const state = this.requireState(id);
+    this.clearAutoRefresh(state);
     this.resetClient(state);
     this.states.delete(id);
     this.config.servers = this.config.servers.filter((server) => server.id !== id);
@@ -245,7 +277,11 @@ export class RelayManager {
       server.id === id ? { ...server, enabled } : server,
     );
     if (enabled) await this.ensureToolsFresh(state, true);
-    else this.resetClient(state);
+    if (enabled) this.scheduleAutoRefresh(state);
+    else {
+      this.clearAutoRefresh(state);
+      this.resetClient(state);
+    }
     await writeConfig(this.config, this.configPath);
     await this.notifyListChanged();
     return { content: textJson({ ok: true, id, enabled }) };
@@ -263,6 +299,7 @@ export class RelayManager {
     const server = normalizeServer(input as RelayServerConfig);
     const state: RelayState = {
       config: server,
+      nextAutoRefreshAt: 0,
       cachedTools: [],
       cachedAt: 0,
       lastRefreshAttemptAt: 0,
@@ -333,6 +370,13 @@ export class RelayManager {
   private async connectClient(state: RelayState) {
     const env = await loadEnvFile(state.config.envFile);
     const headers = this.headersFor(state.config, env);
+    this.logger.info('upstream_connect_start', {
+      serverId: state.config.id,
+      url: state.config.remote.url,
+      mode: state.config.mode || 'generic-cached',
+      hasEnvFile: Boolean(state.config.envFile),
+      headerNames: Object.keys(headers),
+    });
     const client = new Client({ name: `mcp-local-relay-${state.config.id}`, version: '0.1.0' }, {
       capabilities: {},
     });
@@ -346,11 +390,27 @@ export class RelayManager {
       },
     });
     transport.onerror = (err) => {
-      state.lastRefreshError = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
+      if (!state.client && /AbortError|operation was aborted/i.test(message)) return;
+      state.lastRefreshError = message;
+      this.logger.warn('upstream_transport_error', {
+        serverId: state.config.id,
+        ...errorFields(err),
+      });
     };
-    await client.connect(transport, { timeout: 20000 });
-    state.client = client;
-    return client;
+    try {
+      await client.connect(transport, { timeout: 20000 });
+      state.client = client;
+      this.logger.info('upstream_connect_ok', { serverId: state.config.id });
+      return client;
+    } catch (err) {
+      this.logger.error('upstream_connect_failed', {
+        serverId: state.config.id,
+        url: state.config.remote.url,
+        ...errorFields(err),
+      });
+      throw err;
+    }
   }
 
   private headersFor(config: RelayServerConfig, env: Record<string, string>) {
@@ -373,19 +433,81 @@ export class RelayManager {
       return await this.refreshTools(state);
     } catch (err) {
       state.lastRefreshError = err instanceof Error ? err.message : String(err);
+      this.logger.warn('upstream_tools_refresh_failed_using_cache', {
+        serverId: state.config.id,
+        cachedTools: state.cachedTools.length,
+        cachedAt: state.cachedAt,
+        ...errorFields(err),
+      });
       return state.cachedTools;
+    }
+  }
+
+  private scheduleAutoRefresh(state: RelayState) {
+    this.clearAutoRefresh(state);
+    const interval = state.config.cache?.autoRefreshMs || 0;
+    if (state.config.enabled === false || interval <= 0) {
+      state.nextAutoRefreshAt = 0;
+      return;
+    }
+    state.nextAutoRefreshAt = Date.now() + interval;
+    state.autoRefreshTimer = setTimeout(() => {
+      void this.autoRefreshState(state);
+    }, interval);
+    state.autoRefreshTimer.unref?.();
+    this.logger.info('upstream_auto_refresh_scheduled', {
+      serverId: state.config.id,
+      autoRefreshMs: interval,
+      nextAutoRefreshAt: state.nextAutoRefreshAt,
+    });
+  }
+
+  private clearAutoRefresh(state: RelayState) {
+    if (state.autoRefreshTimer) clearTimeout(state.autoRefreshTimer);
+    state.autoRefreshTimer = undefined;
+    state.nextAutoRefreshAt = 0;
+  }
+
+  private async autoRefreshState(state: RelayState, immediate = false) {
+    if (this.states.get(state.config.id) !== state || state.config.enabled === false) return;
+    const before = JSON.stringify(state.cachedTools);
+    try {
+      await this.ensureToolsFresh(state, true);
+      if (before !== JSON.stringify(state.cachedTools)) {
+        await this.notifyListChanged();
+        this.logger.info('upstream_auto_refresh_tools_changed', {
+          serverId: state.config.id,
+          tools: state.cachedTools.length,
+        });
+      }
+    } finally {
+      if (!immediate || this.states.get(state.config.id) === state) this.scheduleAutoRefresh(state);
     }
   }
 
   private async refreshTools(state: RelayState) {
     state.lastRefreshAttemptAt = Date.now();
-    const client = await this.getClient(state);
-    const result = await client.listTools(undefined, { timeout: 20000 });
-    state.cachedTools = normalizeTools(result);
-    state.cachedAt = Date.now();
-    state.lastRefreshError = '';
-    await this.saveCache(state);
-    return state.cachedTools;
+    this.logger.info('upstream_tools_refresh_start', { serverId: state.config.id });
+    try {
+      const client = await this.getClient(state);
+      const result = await client.listTools(undefined, { timeout: 20000 });
+      state.cachedTools = normalizeTools(result);
+      state.cachedAt = Date.now();
+      state.lastRefreshError = '';
+      await this.saveCache(state);
+      this.logger.info('upstream_tools_refresh_ok', {
+        serverId: state.config.id,
+        tools: state.cachedTools.length,
+        cachedAt: state.cachedAt,
+      });
+      return state.cachedTools;
+    } catch (err) {
+      this.logger.error('upstream_tools_refresh_failed', {
+        serverId: state.config.id,
+        ...errorFields(err),
+      });
+      throw err;
+    }
   }
 
   private async menuStatusForState(state: RelayState, force = false): Promise<RelayMenuStatus> {
@@ -402,6 +524,10 @@ export class RelayManager {
       return status;
     } catch (err) {
       state.menuLastError = err instanceof Error ? err.message : String(err);
+      this.logger.warn('upstream_menu_status_failed', {
+        serverId: state.config.id,
+        ...errorFields(err),
+      });
       const fallback = fallbackMenuStatus(state, state.menuLastError);
       state.menuStatus = fallback;
       state.menuCachedAt = Date.now();
@@ -436,6 +562,12 @@ export class RelayManager {
         { timeout: 120000 },
       );
     } catch (err) {
+      this.logger.error('upstream_menu_action_failed', {
+        serverId: state.config.id,
+        actionId: action.id,
+        toolName,
+        ...errorFields(err),
+      });
       this.resetClient(state);
       throw err;
     }
@@ -446,6 +578,11 @@ export class RelayManager {
       const parsed = JSON.parse(await readFile(toolsCachePath(state.config.id), 'utf8'));
       state.cachedTools = normalizeTools(parsed);
       state.cachedAt = Number(parsed.cachedAt || 0);
+      this.logger.info('tools_cache_loaded', {
+        serverId: state.config.id,
+        tools: state.cachedTools.length,
+        cachedAt: state.cachedAt,
+      });
     } catch {
       state.cachedTools = [];
       state.cachedAt = 0;
@@ -467,6 +604,7 @@ export class RelayManager {
     state.menuStatus = undefined;
     state.menuCachedAt = 0;
     if (client) void client.close().catch(() => {});
+    if (client) this.logger.info('upstream_client_reset', { serverId: state.config.id });
   }
 
   private requireState(id: string) {
